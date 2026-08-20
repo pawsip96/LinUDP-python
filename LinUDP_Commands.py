@@ -110,6 +110,20 @@ def switch_on(target_ip, settle_s=0.1):
         return False
 
 
+def switch_off(target_ip):
+    """
+    Force the drive into switched-off state: reset bit 0 (SwitchOn) to 0.
+    """
+    aci.setSwitchOnBit(target_ip, False)
+
+    if not aci.isSwitchOnActive(target_ip):
+        print(f"switch_off {target_ip} -> success")
+        return True
+    else:
+        print(f"switch_off {target_ip} -> FAILED (DLL error: {aci.getDLLError()!r})")
+        return False
+
+
 def acknowledge_errors(target_ip):
     set_acknowledge_errors_bit(target_ip, False)
     time.sleep(0.5)
