@@ -4,6 +4,7 @@ main.py
 Entry point: wires together the connection + drive functions from
 linudp_functions.py.
 """
+import time
 
 import LinUDP_Commands
 
@@ -18,9 +19,13 @@ def main():
         return
 
     try:
-        LinUDP_Commands.get_actual_position(ROTARY_DRIVE)
-        LinUDP_Commands.home_drive(ROTARY_DRIVE)
-        # ... further application logic / drive control goes here ...
+        LinUDP_Commands.home_drive(LINEAR_DRIVE)
+        LinUDP_Commands.get_actual_position(LINEAR_DRIVE)
+        LinUDP_Commands.send_mc_Absolute_VAI(LINEAR_DRIVE, -10, 0.1, 1, 1)
+        time.sleep(4)
+        LinUDP_Commands.motion_finished(LINEAR_DRIVE)
+        LinUDP_Commands.get_actual_position(LINEAR_DRIVE)
+
     finally:
         LinUDP_Commands.close_connection()
 

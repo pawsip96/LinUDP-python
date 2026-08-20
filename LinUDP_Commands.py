@@ -10,6 +10,7 @@ import clr
 import sys
 import time
 
+
 # Add the folder containing LinUDP.dll to the path, then load the assembly.
 sys.path.append(r"C:\Program Files (x86)\LinMot LinUDP Driver and Testtool")
 clr.AddReference("LinUDP")
@@ -46,7 +47,7 @@ def establish_connection(ip_list, host_ip="", host_port="", target_port=""):
         aci.SetTargetAddressList(ip, target_port)
 
     result = aci.ActivateConnection(host_ip, host_port)
-    print(f"ActivateConnection  {result}")
+    print(f"ActivateConnection")
     return result
 
 
@@ -55,7 +56,7 @@ def close_connection():
     global aci
     if aci is not None:
         result = aci.CloseConnection()
-        print(f"CloseConnection  {result}")
+        print(f"CloseConnection")
         return result
     return False
 
@@ -105,7 +106,6 @@ def acknowledge_errors(target_ip):
         print(f"Error Acknowledge {target_ip} successful")
     else:
         print(f"Error Acknowledge {target_ip} failed")
-import time
 
 
 
@@ -142,28 +142,121 @@ def get_ram(target_ip, upid):
     return value
 
 
-def set_ram(target_ip, upid, value, timeout_s=5.0, poll_interval_s=0.05):
+def set_ram(target_ip, upid, value, timeout_s=5.0, poll_interval_s=0.1):
     """
     Write a parameter to drive RAM (runtime only, lost on reboot).
     Manual: "long setRAM_ByUPID(TargetIP As String, UPID As Uint32, Value As long)"
 
-    Polls while the drive reports code 2 ("command is running"), up to
-    timeout_s. Returns the final status code (0 = success, see Table 4).
+    Note: in practice this has been observed to return the written value
+    itself on success, not strictly 0 as the manual's Table 4 describes --
+    treat any of {0, value} as success, and only the documented negative
+    codes as real errors.
     """
     upid_i = _upid_to_int(upid)
+    value_i = int(value)
 
     deadline = time.time() + timeout_s
-    code = aci.setRAM_ByUPID(target_ip, upid_i, int(value))
+    code = aci.SetRAM_ByUPID(target_ip, upid_i, value_i)
     while code == 2 and time.time() < deadline:
         time.sleep(poll_interval_s)
-        code = aci.setRAM_ByUPID(target_ip, upid_i, int(value))
+        code = aci.SetRAM_ByUPID(target_ip, upid_i, value_i)
 
-    if code == 0:
-        print(f"setRAM {target_ip} UPID {upid_i:04X}h = {value} -> OK")
-    else:
+    known_errors = {192, 193, 194, 195, 208, 9090}
+    if code in known_errors:
         status = _PARAM_RETURN_CODES.get(code, f"unknown code {code}")
-        print(f"setRAM {target_ip} UPID {upid_i:04X}h = {value} -> "
+        print(f"setRAM {target_ip} UPID {upid_i:04X}h = {value_i} -> "
               f"FAILED (code {code}: {status})")
+    else:
+        print(f"setRAM {target_ip} UPID {upid_i:04X}h = {value_i} -> OK (code {code})")
 
     return code
+
+
+
+# ── Motion commands (LMmt_*, manual chapter 2.3.3) ──────────────────────────
+
+def send_mc_Absolute_VAI(target_ip, target_pos, max_v, acc, dcc):
+    """
+    Absolute point-to-point move.
+    Manual: "boolean LMmt_MoveAbs(TargetIP, Pos1, MaxVel1, Acc1, Dec1)"
+    """
+    result = aci.LMmt_MoveAbs(target_ip, float(target_pos), float(max_v), float(acc), float(dcc))
+    print(f"LMmt_MoveAbs {target_ip} -> pos={target_pos} v={max_v} acc={acc} dcc={dcc} -> {result}")
+    return result
+
+
+def send_mc_Relative_VAI(target_ip, target_pos, max_v, acc, dcc):
+    """
+    Relative point-to-point move.
+    Manual: "boolean LMmt_MoveRel(TargetIP, Pos1, MaxVel1, Acc1, Dec1)"
+    """
+    result = aci.LMmt_MoveRel(target_ip, float(target_pos), float(max_v), float(acc), float(dcc))
+    print(f"LMmt_MoveRel {target_ip} -> pos={target_pos} v={max_v} acc={acc} dcc={dcc} -> {result}")
+    return result
+
+
+def motion_finished(target_ip, timeout=10.0, poll_interval_s=0.02):
+    """
+    Block until the drive reports motion has finished (isMotionActive == False)
+    or timeout (s) elapses.
+    """
+    deadline = time.time() + timeout
+    while aci.isMotionActive(target_ip) and time.time() < deadline:
+        time.sleep(poll_interval_s)
+
+    if aci.isMotionActive(target_ip):
+        print(f"motion_finished {target_ip} -> TIMEOUT after {timeout}s")
+        return False
+
+    print(f"motion_finished {target_ip} -> done")
+    return True
+
+
+# ── Force control commands (LMfc_*, manual chapter 2.3.3,
+#    "Force Control" order no. 0150-2503) ───────────────────────────────────
+
+def send_fc_VAI_GoToPosFromActPos_ResetForceControlSetI(target_ip, target_pos, max_v, acc, dcc):
+    """
+    'VAI Go To Pos From Act Pos And Reset Force Control Set I'
+    Manual: "boolean LMfc_GoToPosRstForceCtrlSetI(TargetIP, Position, Velocity,
+             Acceleration, Deceleration)"
+
+    Resets force control to normal position control, setting the I-term to
+    the current value of the last force value, while moving to target_pos.
+    No force parameters -- the drive reuses the last active force value.
+    """
+    result = aci.LMfc_GoToPosRstForceCtrlSetI(
+        target_ip, float(target_pos), float(max_v), float(acc), float(dcc))
+    print(f"LMfc_GoToPosRstForceCtrlSetI {target_ip} -> pos={target_pos} "
+          f"v={max_v} acc={acc} dcc={dcc} -> {result}")
+    return result
+
+
+def send_fc_VAI_IncActPosWithHigherForceCtrlLimitAndTargetForce(
+        target_ip, target_pos, max_v, acc, force_limit, target_force):
+    """
+    'VAI Inc Act Pos With Higher Force Ctrl Limit and Target Force'
+    Manual: "boolean LMfc_IncrementActPosWithHigherForceCtrlLimitAndTargetForce(
+             TargetIP, PositionIncrement, MaxVelocity, Acceleration,
+             ForceLimit, TargetForce)"
+
+    No deceleration parameter exists for this command.
+    """
+    result = aci.LMfc_IncrementActPosWithHigherForceCtrlLimitAndTargetForce(
+        target_ip, float(target_pos), float(max_v), float(acc),
+        float(force_limit), float(target_force))
+    print(f"LMfc_IncrementActPosWithHigherForceCtrlLimitAndTargetForce {target_ip} -> "
+          f"pos={target_pos} v={max_v} acc={acc} force_limit={force_limit} "
+          f"target_force={target_force} -> {result}")
+    return result
+
+
+def send_fc_ChangeTargetForce(target_ip, force):
+    """
+    Manual: "boolean LMfc_ChangeTargetForce(TargetIP, TargetForce)"
+    """
+    result = aci.LMfc_ChangeTargetForce(target_ip, float(force))
+    print(f"LMfc_ChangeTargetForce {target_ip} -> force={force} -> {result}")
+    return result
+
 
