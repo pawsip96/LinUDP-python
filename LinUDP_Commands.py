@@ -88,17 +88,26 @@ def home_drive(target_ip):
     return result
 
 
-def switch_on(target_ip):
-    """Function checks if motor on switch on, if it's not, it will swich it on"""
-    if not aci.isSwitchOnActive(target_ip):
-        if aci.SwitchOn(target_ip):
-            print(f"SwitchOn {target_ip} success")
-            return True
-        else:
-            print(f"SwitchOn {target_ip} failed")
-            return False
+def switch_on(target_ip, settle_s=0.1):
+    """
+    Force the drive into switched-on state: reset bit 0 (SwitchOn) to 0,
+    then set it to 1, regardless of its current state.
+
+    Manual: "boolean setSwitchOnBit(TargetIP As String, State as Boolean)"
+    -- direct set/reset of Control Word bit 0, unlike SwitchOn() which
+    toggles the bit and requires knowing the current state first.
+    """
+    aci.setSwitchOnBit(target_ip, False)
+    time.sleep(settle_s)
+    aci.setSwitchOnBit(target_ip, True)
+    time.sleep(settle_s)
+
+    if aci.isSwitchOnActive(target_ip):
+        print(f"switch_on {target_ip} -> success")
+        return True
     else:
-        print(f"SwitchOn {target_ip}: already active")
+        print(f"switch_on {target_ip} -> FAILED (DLL error: {aci.getDLLError()!r})")
+        return False
 
 
 def acknowledge_errors(target_ip):
@@ -111,7 +120,8 @@ def acknowledge_errors(target_ip):
 
 
 def set_acknowledge_errors_bit(target_ip, status):
-    aci.SetErrorAcknowledgeBit(target_ip, status)
+    if not aci.setErrorAcknowledgeBit(target_ip, status):
+        print(f"Error Acknowledge {target_ip} failed")
 
 
 # ── RAM parameter access (manual chapter 2.3.3, Table 4) ───────────────────
