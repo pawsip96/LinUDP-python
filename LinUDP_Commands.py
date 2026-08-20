@@ -8,6 +8,7 @@ focused on orchestration (which drives, in what order, with what values).
 
 import clr
 import sys
+import time
 
 # Add the folder containing LinUDP.dll to the path, then load the assembly.
 sys.path.append(r"C:\Program Files (x86)\LinMot LinUDP Driver and Testtool")
@@ -38,7 +39,7 @@ def establish_connection(ip_list, host_ip="", host_port="", target_port=""):
     """
     global aci
 
-    aci = ACI()  # equivalent of "ACI1 = New LinUDP.ACI"
+    aci = ACI()  # equivalent of "aci = New LinUDP.ACI"
 
     aci.ClearTargetAddressList()
     for ip in ip_list:
@@ -104,3 +105,65 @@ def acknowledge_errors(target_ip):
         print(f"Error Acknowledge {target_ip} successful")
     else:
         print(f"Error Acknowledge {target_ip} failed")
+import time
+
+
+
+# ── RAM parameter access (manual chapter 2.3.3, Table 4) ───────────────────
+
+# Return codes for parameter write operations (Table 4: "Return values
+# during parameter access"). Reads (get*) return the raw data value
+# directly, not a status code.
+_PARAM_RETURN_CODES = {
+    0: "OK, command executed",
+    2: "Command is running",
+    192: "UPID wrong",
+    193: "Parameter data type wrong",
+    194: "Range error",
+    195: "Address usage wrong",
+    208: "Odd Address",
+    9090: "Timeout during parameter channel access",
+}
+
+
+def _upid_to_int(upid):
+    """Accepts a UPID as a hex string ('13A6') or an int, returns int."""
+    return int(upid, 16) if isinstance(upid, str) else int(upid)
+
+
+def get_ram(target_ip, upid):
+    """
+    Read a parameter's current value from drive RAM.
+    Manual: "long getRAM_ByUPID(TargetIP As String, UPID As Uint32)"
+    """
+    upid_i = _upid_to_int(upid)
+    value = aci.getRAM_ByUPID(target_ip, upid_i)
+    print(f"getRAM {target_ip} UPID {upid_i:04X}h -> {value}")
+    return value
+
+
+def set_ram(target_ip, upid, value, timeout_s=5.0, poll_interval_s=0.05):
+    """
+    Write a parameter to drive RAM (runtime only, lost on reboot).
+    Manual: "long setRAM_ByUPID(TargetIP As String, UPID As Uint32, Value As long)"
+
+    Polls while the drive reports code 2 ("command is running"), up to
+    timeout_s. Returns the final status code (0 = success, see Table 4).
+    """
+    upid_i = _upid_to_int(upid)
+
+    deadline = time.time() + timeout_s
+    code = aci.setRAM_ByUPID(target_ip, upid_i, int(value))
+    while code == 2 and time.time() < deadline:
+        time.sleep(poll_interval_s)
+        code = aci.setRAM_ByUPID(target_ip, upid_i, int(value))
+
+    if code == 0:
+        print(f"setRAM {target_ip} UPID {upid_i:04X}h = {value} -> OK")
+    else:
+        status = _PARAM_RETURN_CODES.get(code, f"unknown code {code}")
+        print(f"setRAM {target_ip} UPID {upid_i:04X}h = {value} -> "
+              f"FAILED (code {code}: {status})")
+
+    return code
+
