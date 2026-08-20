@@ -102,11 +102,16 @@ def switch_on(target_ip):
 
 
 def acknowledge_errors(target_ip):
-    if aci.setErrorAcknowledgeBit(target_ip, True):
-        print(f"Error Acknowledge {target_ip} successful")
-    else:
-        print(f"Error Acknowledge {target_ip} failed")
+    set_acknowledge_errors_bit(target_ip, False)
+    time.sleep(0.5)
+    set_acknowledge_errors_bit(target_ip, True)
+    time.sleep(0.5)
+    set_acknowledge_errors_bit(target_ip, False)
+    print(f"Error Acknowledge {target_ip} successful")
 
+
+def set_acknowledge_errors_bit(target_ip, status):
+    aci.SetErrorAcknowledgeBit(target_ip, status)
 
 
 # ── RAM parameter access (manual chapter 2.3.3, Table 4) ───────────────────
