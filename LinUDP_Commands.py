@@ -88,7 +88,7 @@ def home_drive(target_ip):
     return result
 
 
-def switch_on(target_ip, settle_s=0.1):
+def switch_on(target_ip, settle_s=0.5):
     """
     Force the drive into switched-on state: reset bit 0 (SwitchOn) to 0,
     then set it to 1, regardless of its current state.
@@ -104,6 +104,7 @@ def switch_on(target_ip, settle_s=0.1):
 
     if aci.isSwitchOnActive(target_ip):
         print(f"switch_on {target_ip} -> success")
+        time.sleep(settle_s)
         return True
     else:
         print(f"switch_on {target_ip} -> FAILED (DLL error: {aci.getDLLError()!r})")
@@ -115,7 +116,7 @@ def switch_off(target_ip):
     Force the drive into switched-off state: reset bit 0 (SwitchOn) to 0.
     """
     aci.setSwitchOnBit(target_ip, False)
-
+    time.sleep(0.5)
     if not aci.isSwitchOnActive(target_ip):
         print(f"switch_off {target_ip} -> success")
         return True
@@ -134,7 +135,7 @@ def acknowledge_errors(target_ip):
 
 
 def set_acknowledge_errors_bit(target_ip, status):
-    if not aci.setErrorAcknowledgeBit(target_ip, status):
+    if not aci.SetErrorAcknowledgeBit(target_ip, status):
         print(f"Error Acknowledge {target_ip} failed")
 
 
@@ -224,7 +225,7 @@ def send_mc_Relative_VAI(target_ip, target_pos, max_v, acc, dcc):
     return result
 
 
-def motion_finished(target_ip, timeout=10.0, poll_interval_s=0.02):
+def motion_finished(target_ip, timeout=10.0, poll_interval_s=0.1):
     """
     Block until the drive reports motion has finished (isMotionActive == False)
     or timeout (s) elapses.
