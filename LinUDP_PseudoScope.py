@@ -88,7 +88,7 @@ class PseudoScopeRecorder:
     def _run_one_burst(self, poll_interval_s=0.02, timeout_s=30.0):
         with self._lock:
             self._set_sample_count(self.samples_per_burst)
-            started = LinUDP_Commands.aci.EnablePseudoScopeTrace(self.target_ip)
+            started = LinUDP_Commands.aci.enablePseudoScopeTrace(self.target_ip)
 
         if not started:
             print(f"EnablePseudoScopeTrace {self.target_ip} -> FAILED to start "

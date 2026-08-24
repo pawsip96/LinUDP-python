@@ -31,6 +31,18 @@ def startup(drives):
         time.sleep(message_delay)
 
 
+def close_connection(drives):
+    for drive in drives:
+        LinUDP_Commands.switch_off(drive)
+    LinUDP_Commands.close_connection()
+
+
+def start_assembly_process():
+    LinUDP_Commands.send_mc_Absolute_VAI(LINEAR_DRIVE, -20, 0.01, 1, 1)
+    time.sleep(3)
+    LinUDP_Commands.get_actual_position(LINEAR_DRIVE)
+
+
 def main():
     if not LinUDP_Commands.establish_connection([ROTARY_DRIVE, LINEAR_DRIVE], HOST_IP):
         print("Failed to activate connection.")
@@ -38,29 +50,23 @@ def main():
 
     try:
         startup([ROTARY_DRIVE, LINEAR_DRIVE])
-
         LinUDP_Commands.home_drive(LINEAR_DRIVE)
         time.sleep(message_delay)
 
         scope = PseudoScopeRecorder(
-            LINEAR_DRIVE,
-            channels={2: 0.001, 3: 1.0, 4: 0.01},  # log all three at once, each with its own scale
+            ROTARY_DRIVE,
+            channels={2: 0.1, 3: 1.0, 4: 0.1},  # log all three at once, each with its own scale
             samples_per_burst=200,
         )
         scope.start()
 
-        LinUDP_Commands.send_mc_Absolute_VAI(LINEAR_DRIVE, -20, 0.01, 1, 1)
-        time.sleep(3)
-        LinUDP_Commands.motion_finished(LINEAR_DRIVE)
-        time.sleep(message_delay)
-        LinUDP_Commands.get_actual_position(LINEAR_DRIVE)
+        LinUDP_Commands.set_ram(ROTARY_DRIVE, '13A6', 1000)
 
         scope.stop()
         scope.save_csv("torque_log.csv")
 
     finally:
-        LinUDP_Commands.switch_off(LINEAR_DRIVE)
-        LinUDP_Commands.close_connection()
+        close_connection([LINEAR_DRIVE, ROTARY_DRIVE])
 
 
 if __name__ == "__main__":
