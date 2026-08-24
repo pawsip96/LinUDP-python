@@ -245,7 +245,13 @@ def motion_finished(target_ip, timeout=10.0, poll_interval_s=0.1):
 # ── Force control commands (LMfc_*, manual chapter 2.3.3,
 #    "Force Control" order no. 0150-2503) ───────────────────────────────────
 
-def send_fc_VAI_GoToPosFromActPos_ResetForceControlSetI(target_ip, target_pos, max_v, acc, dcc):
+def send_fc_VAI_GoToPosFromActPos_ResetForceControlSetI(
+        target_ip, #target drive ip
+        target_pos, #target position in °
+        max_v, #max velocity in °/s
+        acc,
+        dcc
+):
     """
     'VAI Go To Pos From Act Pos And Reset Force Control Set I'
     Manual: "boolean LMfc_GoToPosRstForceCtrlSetI(TargetIP, Position, Velocity,
@@ -256,7 +262,7 @@ def send_fc_VAI_GoToPosFromActPos_ResetForceControlSetI(target_ip, target_pos, m
     No force parameters -- the drive reuses the last active force value.
     """
     result = aci.LMfc_GoToPosRstForceCtrlSetI(
-        target_ip, float(target_pos), float(max_v), float(acc), float(dcc))
+        target_ip, float(target_pos/10), float(max_v/10000), float(acc), float(dcc))
     print(f"LMfc_GoToPosRstForceCtrlSetI {target_ip} -> pos={target_pos} "
           f"v={max_v} acc={acc} dcc={dcc} -> {result}")
     return result

@@ -60,8 +60,17 @@ def main():
         )
         scope.start()
 
-        LinUDP_Commands.set_ram(ROTARY_DRIVE, '13A6', 1000)
+        LinUDP_Commands.send_fc_VAI_GoToPosFromActPos_ResetForceControlSetI(
+            ROTARY_DRIVE,
+            0,
+            10,
+            1,
+            0.64,
+        )
 
+        LinUDP_Commands.motion_finished(ROTARY_DRIVE)
+
+        time.sleep(10)
         scope.stop()
         scope.save_csv("torque_log.csv")
 
