@@ -27,6 +27,7 @@ except ImportError as exc:
 # Module-level connection handle, shared by every function below.
 # (Equivalent to the VBA "Public Shared ACI As LinUDP.ACI" pattern.)
 aci = None
+FORCE_SCALE = 0.00057295779513082  # Nm / count
 
 
 def establish_connection(ip_list, host_ip="", host_port="", target_port=""):
@@ -278,6 +279,11 @@ def send_fc_VAI_IncActPosWithHigherForceCtrlLimitAndTargetForce(
 
     No deceleration parameter exists for this command.
     """
+    target_force = (target_force/FORCE_SCALE)/10
+    force_limit = (force_limit/FORCE_SCALE)/10
+    target_pos = target_pos/10
+    max_v = max_v/10000
+
     result = aci.LMfc_IncrementActPosWithHigherForceCtrlLimitAndTargetForce(
         target_ip, float(target_pos), float(max_v), float(acc),
         float(force_limit), float(target_force))
@@ -296,3 +302,68 @@ def send_fc_ChangeTargetForce(target_ip, force):
     return result
 
 
+def int16(value):
+    value &= 0xFFFF
+    return value - 0x10000 if value >= 0x8000 else value
+
+
+def get_measured_force(target_ip):
+    """
+    Read the measured force value from the LinMot drive RAM (UPID 1EA1h).
+
+    The drive returns the parameter as a 16-bit IInt16 value through
+    getRAM_ByUPID(). The API itself returns a long, so the lower 16 bits
+    are converted to signed Int16 before applying the parameter scale.
+
+    Parameter:
+        UPID:  1EA1h
+        Type:  IInt16
+        Scale: 0.00057295779513082 Nm
+
+    Args:
+        target_ip (str): IP address of the LinMot drive.
+
+    Returns:
+        float: Measured value in Nm.
+    """
+    raw = aci.getRAM_ByUPID(target_ip, 0x1EA1)
+    signed_value = int16(raw)
+    measured_force = signed_value * FORCE_SCALE
+    return measured_force
+
+def reboot_drive(target_ip, timeout_s=10.0, poll_interval_s=0.1):
+    """
+    Reboot the controller.
+    Manual: "long LMcf_StartStopDefault(TargetIP As String, Mode As Integer)"
+    Mode 0 = Reboot of the controller (Table 3).
+
+    Polls while the drive reports code 2 ("command is running"), up to
+    timeout_s. Returns True on success (code 0), False otherwise.
+    """
+    deadline = time.time() + timeout_s
+    code = aci.LMcf_StartStopDefault(target_ip, 0)
+    while code == 2 and time.time() < deadline:
+        time.sleep(poll_interval_s)
+        code = aci.LMcf_StartStopDefault(target_ip, 0)
+
+    if code == 0:
+        print(f"reboot_drive {target_ip} -> OK")
+        return True
+    elif code == 9090:
+        print(f"reboot_drive {target_ip} -> TIMEOUT (code 9090, "
+              f"DLL error: {aci.getDLLError()!r})")
+        return False
+    else:
+        print(f"reboot_drive {target_ip} -> FAILED (code {code})")
+        return False
+
+
+def send_mc_stop(target_ip, deceleration=0.1):
+    """
+    Stop the current movement on the drive with the given deceleration.
+    Manual: "boolean LMmt_Stop(TargetIP As String, Deceleration As Single)"
+    Deceleration is in m/s^2.
+    """
+    result = aci.LMmt_Stop(target_ip, float(deceleration))
+    print(f"LMmt_Stop {target_ip} -> deceleration={deceleration} -> {result}")
+    return result
