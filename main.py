@@ -42,14 +42,43 @@ def close_connection(drives):
     LinUDP_Commands.close_connection()
 
 
+def reset_rotary_position():
+    print("Resetting rotary position...")
+    actual_position = LinUDP_Commands.get_actual_position(ROTARY_DRIVE) * 10
+    print("Actual position " + f"{actual_position} ")
+    LinUDP_Commands.send_fc_VAI_GoToPosFromActPos_ResetForceControlSetI(ROTARY_DRIVE, 0, 360, 100, 100)
+
+    while actual_position > 1 or actual_position < -1:
+        actual_position = LinUDP_Commands.get_actual_position(ROTARY_DRIVE) * 10
+        time.sleep(0.5)
+
+def await_linear_position(demand_position):
+    print("Awaiting linear position " + f"{demand_position} ")
+    actual_position = LinUDP_Commands.get_actual_position(LINEAR_DRIVE)
+    tolerance = 0.5
+
+    while not demand_position - tolerance <= actual_position <= demand_position + tolerance:
+        actual_position = LinUDP_Commands.get_actual_position(LINEAR_DRIVE)
+        time.sleep(0.5)
+
+
+def await_rotary_position(demand_position):
+    print("Awaiting rotary position " + f"{demand_position} ")
+    actual_position = LinUDP_Commands.get_actual_position(ROTARY_DRIVE)
+    tolerance = 0.5
+
+    while not demand_position - tolerance <= actual_position <= demand_position + tolerance:
+        actual_position = LinUDP_Commands.get_actual_position(ROTARY_DRIVE)
+        time.sleep(0.5)
+
+
 def start_assembly_process():
-    LinUDP_Commands.send_fc_VAI_GoToPosFromActPos_ResetForceControlSetI(ROTARY_DRIVE, 0, 60, 100, 100)
+    reset_rotary_position()
     time.sleep(message_delay)
-    LinUDP_Commands.set_ram(LINEAR_DRIVE, '13A6', 300)
+    LinUDP_Commands.set_ram(LINEAR_DRIVE, '13A6', 600)
     time.sleep(message_delay)
     LinUDP_Commands.send_mc_Absolute_VAI(LINEAR_DRIVE, -40, 0.01, 1, 1)
-    time.sleep(3)
-    LinUDP_Commands.get_actual_position(LINEAR_DRIVE)
+    await_linear_position(-30)
     time.sleep(message_delay)
     LinUDP_Commands.send_fc_VAI_IncActPosWithHigherForceCtrlLimitAndTargetForce(ROTARY_DRIVE, 6*360, 60, 100, 0.054, 0.055)
 
@@ -79,6 +108,7 @@ def wait_torque_stable(target_torque: float,
         time.sleep(cycle_time_s)
 
         torque = LinUDP_Commands.get_measured_force(ROTARY_DRIVE)
+        print("Measured_force " + f"{ + (torque)} Nm")
         now = time.time()
 
         if now - start_time >= timeout_s:
@@ -107,25 +137,33 @@ def main():
         LinUDP_Commands.home_drive(LINEAR_DRIVE)
         time.sleep(message_delay)
 
-        # scope = PseudoScopeRecorder(
-        #     LINEAR_DRIVE,
-        #     channels={2: 0.1, 3: 1.0, 4: 0.1},  # log all three at once, each with its own scale
-        #     samples_per_burst=200,
-        # )
-        # scope.start()
+        scope = PseudoScopeRecorder(
+            LINEAR_DRIVE,
+            channels={2: 0.1, 3: 1.0, 4: 0.1},  # log all three at once, each with its own scale
+            samples_per_burst=200,
+        )
+        scope.start()
 
 
-        # start_assembly_process()
-        # wait_torque_stable(0.054, 2)
-        # LinUDP_Commands.send_fc_ChangeTargetForce(ROTARY_DRIVE, 0)
+        start_assembly_process()
+        wait_torque_stable(0.044, 1)
+        LinUDP_Commands.send_mc_stop(ROTARY_DRIVE)
+        time.sleep(message_delay)
 
-        # LinUDP_Commands.reboot_drive(LINEAR_DRIVE)
-
-        # scope.stop()
-        # scope.save_csv("torque_log.csv")
-
-        LinUDP_Commands.send_mc_Absolute_VAI(LINEAR_DRIVE, -20, 0.01, 1, 1)
         time.sleep(5)
+        LinUDP_Commands.send_mc_Absolute_VAI(ROTARY_DRIVE, -3, 120/10000, 100, 100)
+        await_rotary_position(-3)
+
+        LinUDP_Commands.set_ram(LINEAR_DRIVE, '13A6', 1000)
+        time.sleep(message_delay)
+        LinUDP_Commands.send_mc_Absolute_VAI(LINEAR_DRIVE, 0, 0.01, 100, 100)
+        await_linear_position(0)
+
+        LinUDP_Commands.send_mc_Absolute_VAI(ROTARY_DRIVE, 0, 360/10000, 100, 100)
+        await_rotary_position(0)
+
+        scope.stop()
+        scope.save_csv("torque_log.csv")
 
 
     finally:
