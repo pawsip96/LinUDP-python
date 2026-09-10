@@ -18,6 +18,12 @@ TARGET_FORCE = 0.063
 
 message_delay = 0.1
 
+scope = PseudoScopeRecorder(
+    ROTARY_DRIVE,
+    channels={2: 1.0, 3: 1.0, 4: 1.0},  # log all three at once, each with its own scale
+    samples_per_burst=200,
+)
+
 
 def startup(drives):
     """
@@ -82,6 +88,9 @@ def start_assembly_process():
     time.sleep(message_delay)
     LinUDP_Commands.send_mc_Absolute_VAI(LINEAR_DRIVE, -40, 0.01, 1, 1)
     await_linear_position(-30)
+
+    scope.start()
+
     time.sleep(message_delay)
 
     LinUDP_Commands.send_fc_VAI_IncActPosWithHigherForceCtrlLimitAndTargetForce(
@@ -109,6 +118,8 @@ def start_disassembly_process():
 
     LinUDP_Commands.send_mc_Absolute_VAI(ROTARY_DRIVE, -3, 360 / 10000, 100, 100)
     await_rotary_position(-3)
+
+    scope.stop()
 
     LinUDP_Commands.set_ram(LINEAR_DRIVE, '13A6', 1000)
     time.sleep(message_delay)
@@ -144,7 +155,7 @@ def wait_torque_stable(target_torque: float,
         time.sleep(cycle_time_s)
 
         torque = LinUDP_Commands.get_measured_force(ROTARY_DRIVE)
-        print("Measured_force " + f"{ + (torque)} Nm")
+        print("Measured_force " + f"{ + torque} Nm")
         now = time.time()
 
         if now - start_time >= timeout_s:
@@ -168,7 +179,7 @@ def wait_torque(target_torque: float, timeout_s: float = 120.0) -> None:
 
     while True:
         torque = LinUDP_Commands.get_measured_force(ROTARY_DRIVE)
-        print("Measured_force " + f"{+ (torque)} Nm")
+        print("Measured_force " + f"{+ torque} Nm")
         now = time.time()
 
         if now - start_time >= timeout_s:
@@ -192,24 +203,15 @@ def main():
         LinUDP_Commands.home_drive(LINEAR_DRIVE)
         time.sleep(message_delay)
 
-        scope = PseudoScopeRecorder(
-            ROTARY_DRIVE,
-            channels={2: 1.0, 3: 1.0, 4: 1.0},  # log all three at once, each with its own scale
-            samples_per_burst=200,
-        )
-        scope.start()
-
-
         start_assembly_process()
+
         wait_torque(TARGET_FORCE)
         LinUDP_Commands.send_mc_stop(ROTARY_DRIVE)
-        time.sleep(message_delay)
 
         time.sleep(2)
 
         start_disassembly_process()
 
-        scope.stop()
         scope.convert()
         scope.save_csv("torque_log.csv")
 

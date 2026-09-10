@@ -76,8 +76,8 @@ class PseudoScopeRecorder:
 
             row = {
                 'elapsed_s': self._elapsed_ms / 1000.0,
-                'actual_pos': entry.ActualPos,
-                'demand_pos': entry.DemandPos,
+                'actual_pos': entry.ActualPos * 10,
+                'demand_pos': entry.DemandPos * 10,
                 'current': entry.Current,
             }
             for channel, scale in self.channels.items():
