@@ -7,6 +7,7 @@ LinUDP_Commands.py.
 import time
 
 import LinUDP_Commands
+from CSV_Graph import CSV_Graph
 from LinUDP_PseudoScope import PseudoScopeRecorder
 
 ROTARY_DRIVE = "192.168.1.1"
@@ -108,7 +109,7 @@ def wait_torque_stable(target_torque: float,
         time.sleep(cycle_time_s)
 
         torque = LinUDP_Commands.get_measured_force(ROTARY_DRIVE)
-        print("Measured_force " + f"{ + (torque)} Nm")
+        # print("Measured_force " + f"{ + (torque)} Nm")
         now = time.time()
 
         if now - start_time >= timeout_s:
@@ -138,8 +139,8 @@ def main():
         time.sleep(message_delay)
 
         scope = PseudoScopeRecorder(
-            LINEAR_DRIVE,
-            channels={2: 0.1, 3: 1.0, 4: 0.1},  # log all three at once, each with its own scale
+            ROTARY_DRIVE,
+            channels={2: 1.0, 3: 1.0, 4: 1.0},  # log all three at once, each with its own scale
             samples_per_burst=200,
         )
         scope.start()
@@ -163,7 +164,11 @@ def main():
         await_rotary_position(0)
 
         scope.stop()
+        scope.convert()
         scope.save_csv("torque_log.csv")
+
+        graph = CSV_Graph("torque_log.csv")
+        graph.display()
 
 
     finally:

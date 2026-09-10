@@ -140,3 +140,39 @@ class PseudoScopeRecorder:
             writer.writeheader()
             writer.writerows(self._entries)
         print(f"PseudoScope data written to {path} ({len(self._entries)} rows)")
+
+
+    def convert(self, channel=2):
+        """
+        Re-interpret already-captured samples for `channel` as signed
+        Int16 and apply the force scale (UPID 1EA1h, 0.00057295779513082
+        Nm/count) -- in place, on self._entries.
+
+        PseudoScope monitoring channels are raw 16-bit samples. This
+        recovers the raw count using the scale the channel was captured
+        with, reinterprets it as a signed Int16 (same convention as
+        get_measured_force), then applies FORCE_SCALE directly -- so the
+        result is correct Nm regardless of what scale was passed in
+        `channels` at construction time (e.g. even if channel 2 was
+        captured raw with scale=1.0).
+
+        Call this once after stop() and before save_csv() / get_data().
+        Safe to call more than once (idempotent).
+        """
+        if channel not in self.channels:
+            raise ValueError(f"Channel {channel} was not configured for this recorder")
+
+        capture_scale = self.channels[channel]
+        if capture_scale == 0:
+            raise ValueError(f"Channel {channel} has a zero scale; cannot recover raw counts")
+
+        key = f'channel{channel}'
+        with self._lock:
+            for row in self._entries:
+                raw = round(row[key] / capture_scale) & 0xFFFF
+                signed = raw - 0x10000 if raw & 0x8000 else raw
+                row[key] = signed * LinUDP_Commands.FORCE_SCALE
+
+        print(f"PseudoScope channel {channel}: {len(self._entries)} samples "
+              f"reinterpreted as signed Int16 and converted to Nm "
+              f"(scale={LinUDP_Commands.FORCE_SCALE})")
