@@ -56,8 +56,7 @@ class CSV_Graph:
         samples were taken.
         """
         fig, ax = plt.subplots()
-        ax.step(self.elapsed_s, self.torque, where='post',
-                 marker='o', markersize=3, linewidth=1)
+        ax.step(self.elapsed_s, self.torque, where='post', linewidth=1)
         ax.set_xlabel("Elapsed time (s)")
         ax.set_ylabel("Torque (Nm)")
         ax.set_title(f"Torque vs. Time \u2014 {self.path}")

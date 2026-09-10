@@ -14,6 +14,8 @@ ROTARY_DRIVE = "192.168.1.1"
 LINEAR_DRIVE = "192.168.1.2"
 HOST_IP = "192.168.1.3"
 
+TARGET_FORCE = 0.065
+
 message_delay = 0.1
 
 
@@ -66,7 +68,7 @@ def await_linear_position(demand_position):
 def await_rotary_position(demand_position):
     print("Awaiting rotary position " + f"{demand_position} ")
     actual_position = LinUDP_Commands.get_actual_position(ROTARY_DRIVE)
-    tolerance = 0.5
+    tolerance = 1
 
     while not demand_position - tolerance <= actual_position <= demand_position + tolerance:
         actual_position = LinUDP_Commands.get_actual_position(ROTARY_DRIVE)
@@ -81,7 +83,24 @@ def start_assembly_process():
     LinUDP_Commands.send_mc_Absolute_VAI(LINEAR_DRIVE, -40, 0.01, 1, 1)
     await_linear_position(-30)
     time.sleep(message_delay)
-    LinUDP_Commands.send_fc_VAI_IncActPosWithHigherForceCtrlLimitAndTargetForce(ROTARY_DRIVE, 6*360, 60, 100, 0.054, 0.055)
+    LinUDP_Commands.send_fc_VAI_IncActPosWithHigherForceCtrlLimitAndTargetForce(ROTARY_DRIVE, 1600, 180, 100, 0.084, 0.085)
+    wait_torque(0.03)
+    LinUDP_Commands.send_fc_VAI_IncActPosWithHigherForceCtrlLimitAndTargetForce(ROTARY_DRIVE, 3*360, 5, 100, 0.084, 0.085)
+
+def start_disassembly_process():
+    LinUDP_Commands.send_mc_Relative_VAI(ROTARY_DRIVE, -5, 10 / 10000, 100, 100)
+    time.sleep(5)
+
+    LinUDP_Commands.send_mc_Absolute_VAI(ROTARY_DRIVE, -3, 180 / 10000, 100, 100)
+    await_rotary_position(-3)
+
+    LinUDP_Commands.set_ram(LINEAR_DRIVE, '13A6', 1000)
+    time.sleep(message_delay)
+    LinUDP_Commands.send_mc_Absolute_VAI(LINEAR_DRIVE, 0, 0.01, 100, 100)
+    await_linear_position(0)
+
+    LinUDP_Commands.send_mc_Absolute_VAI(ROTARY_DRIVE, 0, 360 / 10000, 100, 100)
+    await_rotary_position(0)
 
 
 def wait_torque_stable(target_torque: float,
@@ -109,7 +128,7 @@ def wait_torque_stable(target_torque: float,
         time.sleep(cycle_time_s)
 
         torque = LinUDP_Commands.get_measured_force(ROTARY_DRIVE)
-        # print("Measured_force " + f"{ + (torque)} Nm")
+        print("Measured_force " + f"{ + (torque)} Nm")
         now = time.time()
 
         if now - start_time >= timeout_s:
@@ -126,6 +145,25 @@ def wait_torque_stable(target_torque: float,
                 return
         else:
             stable_since = None
+
+def wait_torque(target_torque: float, timeout_s: float = 120.0) -> None:
+
+    start_time = time.time()
+
+    while True:
+        torque = LinUDP_Commands.get_measured_force(ROTARY_DRIVE)
+        print("Measured_force " + f"{+ (torque)} Nm")
+        now = time.time()
+
+        if now - start_time >= timeout_s:
+            raise TimeoutError(
+                f"Timeout waiting for torque: "
+                f"{torque:.6f} Nm < {target_torque:.6f} Nm"
+            )
+
+        if torque >= target_torque:
+            return
+
 
 
 def main():
@@ -147,32 +185,23 @@ def main():
 
 
         start_assembly_process()
-        wait_torque_stable(0.044, 1)
+        wait_torque(TARGET_FORCE)
         LinUDP_Commands.send_mc_stop(ROTARY_DRIVE)
         time.sleep(message_delay)
 
-        time.sleep(5)
-        LinUDP_Commands.send_mc_Absolute_VAI(ROTARY_DRIVE, -3, 120/10000, 100, 100)
-        await_rotary_position(-3)
+        time.sleep(2)
 
-        LinUDP_Commands.set_ram(LINEAR_DRIVE, '13A6', 1000)
-        time.sleep(message_delay)
-        LinUDP_Commands.send_mc_Absolute_VAI(LINEAR_DRIVE, 0, 0.01, 100, 100)
-        await_linear_position(0)
-
-        LinUDP_Commands.send_mc_Absolute_VAI(ROTARY_DRIVE, 0, 360/10000, 100, 100)
-        await_rotary_position(0)
+        start_disassembly_process()
 
         scope.stop()
         scope.convert()
         scope.save_csv("torque_log.csv")
 
-        graph = CSV_Graph("torque_log.csv")
-        graph.display()
-
 
     finally:
         close_connection([LINEAR_DRIVE, ROTARY_DRIVE])
+        graph = CSV_Graph("torque_log.csv")
+        graph.display()
 
 
 if __name__ == "__main__":
