@@ -14,7 +14,7 @@ ROTARY_DRIVE = "192.168.1.1"
 LINEAR_DRIVE = "192.168.1.2"
 HOST_IP = "192.168.1.3"
 
-TARGET_FORCE = 0.065
+TARGET_FORCE = 0.063
 
 message_delay = 0.1
 
@@ -83,15 +83,31 @@ def start_assembly_process():
     LinUDP_Commands.send_mc_Absolute_VAI(LINEAR_DRIVE, -40, 0.01, 1, 1)
     await_linear_position(-30)
     time.sleep(message_delay)
-    LinUDP_Commands.send_fc_VAI_IncActPosWithHigherForceCtrlLimitAndTargetForce(ROTARY_DRIVE, 1600, 180, 100, 0.084, 0.085)
+
+    LinUDP_Commands.send_fc_VAI_IncActPosWithHigherForceCtrlLimitAndTargetForce(
+        ROTARY_DRIVE,
+        1600,
+        180,
+        100,
+        0.084,
+        0.085
+    )
     wait_torque(0.03)
-    LinUDP_Commands.send_fc_VAI_IncActPosWithHigherForceCtrlLimitAndTargetForce(ROTARY_DRIVE, 3*360, 5, 100, 0.084, 0.085)
+
+    LinUDP_Commands.send_fc_VAI_IncActPosWithHigherForceCtrlLimitAndTargetForce(
+        ROTARY_DRIVE,
+        3*360,
+        2,
+        100,
+        0.084,
+        0.085
+    )
 
 def start_disassembly_process():
     LinUDP_Commands.send_mc_Relative_VAI(ROTARY_DRIVE, -5, 10 / 10000, 100, 100)
     time.sleep(5)
 
-    LinUDP_Commands.send_mc_Absolute_VAI(ROTARY_DRIVE, -3, 180 / 10000, 100, 100)
+    LinUDP_Commands.send_mc_Absolute_VAI(ROTARY_DRIVE, -3, 360 / 10000, 100, 100)
     await_rotary_position(-3)
 
     LinUDP_Commands.set_ram(LINEAR_DRIVE, '13A6', 1000)
