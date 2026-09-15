@@ -4,7 +4,9 @@ main.py
 Entry point: wires together the connection + drive functions from
 LinUDP_Commands.py.
 """
+import os
 import time
+from datetime import datetime
 
 import LinUDP_Commands
 from CSV_Graph import CSV_Graph
@@ -23,6 +25,8 @@ scope = PseudoScopeRecorder(
     channels={2: 1.0, 3: 1.0, 4: 1.0},  # log all three at once, each with its own scale
     samples_per_burst=200,
 )
+
+REPORTS_DIR = "reports"
 
 
 def startup(drives):
@@ -192,11 +196,23 @@ def wait_torque(target_torque: float, timeout_s: float = 120.0) -> None:
             return
 
 
+def build_report_path():
+    """
+    Build a unique path in the reports folder for this run's CSV log,
+    using the current date and time so previous logs are never overwritten.
+    """
+    os.makedirs(REPORTS_DIR, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"torque_log_{timestamp}.csv"
+    return os.path.join(REPORTS_DIR, filename)
+
 
 def main():
     if not LinUDP_Commands.establish_connection([ROTARY_DRIVE, LINEAR_DRIVE], HOST_IP):
         print("Failed to activate connection.")
         return
+
+    report_path = build_report_path()
 
     try:
         startup([ROTARY_DRIVE, LINEAR_DRIVE])
@@ -213,12 +229,13 @@ def main():
         start_disassembly_process()
 
         scope.convert()
-        scope.save_csv("torque_log.csv")
+        scope.save_csv(report_path)
 
 
     finally:
         close_connection([LINEAR_DRIVE, ROTARY_DRIVE])
-        graph = CSV_Graph("torque_log.csv")
+        graph = CSV_Graph(report_path)
+        graph.save_png()
         graph.display()
 
 

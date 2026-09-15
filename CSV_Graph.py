@@ -10,6 +10,7 @@ ignored, as is 'current'.
 """
 
 import csv
+import os
 import matplotlib.pyplot as plt
 
 
@@ -30,6 +31,7 @@ class CSV_Graph:
         self.torque = []
         self.actual_position = []
         self.demand_position = []
+        self.fig = None
         self._load()
 
     def _load(self):
@@ -51,11 +53,11 @@ class CSV_Graph:
         if not self.elapsed_s:
             raise ValueError(f"No data rows found in {self.path}")
 
-    def display(self):
+    def _build_figure(self):
         """
-        Open a new window plotting torque (channel2) vs. elapsed time
-        on the left y-axis, and actual/demand position (degrees) vs.
-        elapsed time on a second y-axis on the right.
+        Build (but do not show) the torque/position figure, caching it
+        on self.fig so display() and save_png() can share the same
+        figure instead of plotting the data twice.
 
         All three traces use a step plot (zero-order hold,
         'steps-post') rather than a straight-line connection between
@@ -64,6 +66,9 @@ class CSV_Graph:
         would draw a linear ramp between two samples, implying
         intermediate values that were never actually measured.
         """
+        if self.fig is not None:
+            return self.fig
+
         fig, ax_torque = plt.subplots()
 
         # Left axis: torque
@@ -96,9 +101,41 @@ class CSV_Graph:
 
         ax_torque.set_title(f"Torque & Position vs. Time \u2014 {self.path}")
         fig.tight_layout()
+
+        self.fig = fig
+        return fig
+
+    def display(self):
+        """
+        Open a new window plotting torque (channel2) vs. elapsed time
+        on the left y-axis, and actual/demand position (degrees) vs.
+        elapsed time on a second y-axis on the right.
+        """
+        self._build_figure()
         plt.show()
+
+    def save_png(self, path=None, dpi=300):
+        """
+        Save the torque/position plot as a high-resolution PNG image.
+
+        Args:
+            path (str, optional): Output PNG path. Defaults to the
+                source CSV path with its extension replaced by
+                '.png' (e.g. "reports/torque_log_20260914_103448.png").
+            dpi (int, optional): Resolution in dots per inch. Defaults
+                to 300, which is print-quality resolution.
+
+        Returns:
+            str: The path the PNG was saved to.
+        """
+        fig = self._build_figure()
+        if path is None:
+            path = os.path.splitext(self.path)[0] + ".png"
+        fig.savefig(path, dpi=dpi, bbox_inches='tight')
+        return path
 
 
 if __name__ == "__main__":
-    graph = CSV_Graph("torque_log.csv")
+    graph = CSV_Graph("reports/torque_log_20260914_103448.csv")
+    graph.save_png()
     graph.display()
