@@ -16,6 +16,7 @@ Differences to main.py:
 """
 import os
 import time
+import traceback
 from datetime import datetime
 
 ROTARY_DRIVE = "192.168.1.1"
@@ -46,7 +47,7 @@ class AssemblyProcess:
     ]
 
     def __init__(self, cmds, scope, graph_cls, status, progress, ask_yes_no,
-                 stop_event, torque_cb=None, stop_wait=1.0,
+                 stop_event, torque_cb=None, error_cb=None, stop_wait=1.0,
                  linear_home_timeout=120.0):
         self.cmds = cmds
         self.scope = scope
@@ -56,6 +57,8 @@ class AssemblyProcess:
         self.ask_yes_no = ask_yes_no    # ask_yes_no(question) -> bool
         self.stop_event = stop_event    # threading.Event set by Stop button
         self.torque_cb = torque_cb or (lambda value: None)
+        self.error_cb = error_cb or (lambda message: None)   # error_cb(text)
+        self._warnings = []             # problems found during shutdown
         self.stop_wait = stop_wait
         self.linear_home_timeout = linear_home_timeout
         self.graph = None
@@ -68,6 +71,10 @@ class AssemblyProcess:
         idx = self.STEPS.index(name)
         self.progress(idx / len(self.STEPS))
         self.status(f"Step {idx + 1}/{len(self.STEPS)}: {name}")
+
+    def _warn(self, text):
+        print(text)
+        self._warnings.append(text)
 
     def _check_stop(self):
         if self.stop_event.is_set():
@@ -172,7 +179,7 @@ class AssemblyProcess:
             if abs(pos) <= 0.5:
                 return True
             time.sleep(0.1)
-        print("WARNING: linear drive did not reach 0 before timeout")
+        self._warn("The linear drive did not reach position 0 before the timeout.")
         return False
 
     def _shutdown(self):
@@ -184,7 +191,7 @@ class AssemblyProcess:
                 self.scope.stop()
                 self._scope_running = False
         except Exception as e:
-            print(f"Error stopping scope: {e}")
+            self._warn(f"Error stopping scope: {e}")
 
         # 1. linear drive to 0 - and really wait until it is there
         try:
@@ -192,7 +199,7 @@ class AssemblyProcess:
             c.send_mc_Absolute_VAI(LINEAR_DRIVE, 0, 0.01, 1, 1)
             self._wait_linear_at_zero()
         except Exception as e:
-            print(f"Error moving linear drive to 0: {e}")
+            self._warn(f"Error moving linear drive to 0: {e}")
 
         # 2. stop + switch off + close
         for d in drives:
@@ -200,16 +207,16 @@ class AssemblyProcess:
                 c.send_mc_stop(d)
                 time.sleep(self.stop_wait)
             except Exception as e:
-                print(f"Error stopping {d}: {e}")
+                self._warn(f"Error stopping {d}: {e}")
         for d in drives:
             try:
                 c.switch_off(d)
             except Exception as e:
-                print(f"Error switching off {d}: {e}")
+                self._warn(f"Error switching off {d}: {e}")
         try:
             c.close_connection()
         except Exception as e:
-            print(f"Error closing connection: {e}")
+            self._warn(f"Error closing connection: {e}")
 
     # ----------------------------------------------------------------- run
     def run(self):
@@ -221,11 +228,17 @@ class AssemblyProcess:
         if not c.establish_connection([ROTARY_DRIVE, LINEAR_DRIVE], HOST_IP):
             self.status("Failed to activate connection.")
             self.progress(0)
+            self.error_cb("Failed to activate the connection to the drives.\n\n"
+                          "Check the cables, the drive power and the IP "
+                          f"addresses ({ROTARY_DRIVE}, {LINEAR_DRIVE}, "
+                          f"host {HOST_IP}).")
             return False
 
+        self._warnings = []
         report_path = self._build_report_path()
         ok = False
         final_msg = ""
+        error_text = None
 
         try:
             # --- startup
@@ -305,8 +318,10 @@ class AssemblyProcess:
             self._emergency_stop()          # stop all movement right away
             final_msg = str(e) or "Process aborted."
         except Exception as e:
+            traceback.print_exc()
             self._emergency_stop()
-            final_msg = f"Error: {e}"
+            final_msg = "Stopped due to an error."
+            error_text = f"{type(e).__name__}: {e}"
         finally:
             self._step("Closing connection")
             self._shutdown()                # linear -> 0, then switch off
@@ -321,4 +336,12 @@ class AssemblyProcess:
 
         self.progress(1.0 if ok else 0.0)
         self.status(final_msg)
+
+        # show errors in a popup (after the safe shutdown has finished)
+        problems = []
+        if error_text:
+            problems.append(error_text)
+        problems.extend(self._warnings)
+        if problems:
+            self.error_cb("\n\n".join(problems))
         return ok

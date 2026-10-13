@@ -19,12 +19,47 @@ from tkinter import ttk, messagebox
 from process import AssemblyProcess, ROTARY_DRIVE
 
 
+class ColorButton(tk.Label):
+    """
+    Coloured button built from a Label. Needed because on macOS the normal
+    tk/ttk buttons ignore background colours. Supports .config(state=...).
+    """
+    DISABLED_BG = "#b5b5b5"
+
+    def __init__(self, parent, text, command, bg, state="normal", width=12):
+        super().__init__(parent, text=text, fg="white", width=width, pady=6,
+                         font=("Helvetica", 12, "bold"))
+        self._color = bg
+        self._command = command
+        self._state = state
+        self.bind("<Button-1>", self._on_click)
+        self._apply()
+
+    def _apply(self):
+        enabled = self._state == "normal"
+        tk.Label.configure(self, bg=self._color if enabled else self.DISABLED_BG,
+                           cursor="hand2" if enabled else "arrow")
+
+    def _on_click(self, _event):
+        if self._state == "normal":
+            self._command()
+
+    def configure(self, **kw):
+        if "state" in kw:
+            self._state = kw.pop("state")
+            self._apply()
+        if kw:
+            tk.Label.configure(self, **kw)
+
+    config = configure
+
+
 class App:
     def __init__(self, root, dev_mode=False):
         self.root = root
         self.dev_mode = dev_mode
         root.title("Assembly Process" + ("  [DEV MODE]" if dev_mode else ""))
-        root.geometry("480x300")
+        root.geometry("460x300")
         root.resizable(False, False)
 
         self.q = queue.Queue()          # worker thread -> GUI thread
@@ -43,11 +78,11 @@ class App:
 
         buttons = ttk.Frame(root)
         buttons.pack(pady=8)
-        self.start_btn = ttk.Button(buttons, text="Start", width=12,
-                                    command=self.start)
+        self.start_btn = ColorButton(buttons, text="Start",
+                                     command=self.start, bg="#2e9e47")  # green
         self.start_btn.grid(row=0, column=0, padx=5)
-        self.stop_btn = ttk.Button(buttons, text="Stop", width=12,
-                                   command=self.stop, state="disabled")
+        self.stop_btn = ColorButton(buttons, text="Stop", command=self.stop,
+                                    bg="#d63031", state="disabled")     # red
         self.stop_btn.grid(row=0, column=1, padx=5)
         if dev_mode:
             self.graph_btn = ttk.Button(buttons, text="Show graph", width=12,
@@ -136,6 +171,7 @@ class App:
                 status=lambda t: self.q.put(("status", t)),
                 progress=lambda f: self.q.put(("progress", f)),
                 torque_cb=lambda v: self.q.put(("torque", v)),
+                error_cb=lambda m: self.q.put(("error", m)),
                 ask_yes_no=self._ask_yes_no,
                 stop_event=self.stop_event,
                 **waits,
@@ -143,7 +179,8 @@ class App:
             proc.run()
             self.q.put(("done", proc.graph))
         except Exception as e:
-            self.q.put(("status", f"Error: {e}"))
+            self.q.put(("status", "Stopped due to an error."))
+            self.q.put(("error", f"{type(e).__name__}: {e}"))
             self.q.put(("done", None))
 
     # --------------------------------------------------------- GUI thread
@@ -159,6 +196,8 @@ class App:
                     v = data[0]
                     self.torque_var.set("Disassembly torque:  ---" if v is None
                                         else f"Disassembly torque:  {v:.4f} Nm")
+                elif kind == "error":
+                    messagebox.showerror("Error", data[0], parent=self.root)
                 elif kind == "ask":
                     question, box = data
                     box["answer"] = messagebox.askyesno(
