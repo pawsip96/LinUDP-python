@@ -9,6 +9,10 @@ Differences to main.py:
   * every wait loop checks the Stop request
   * time.sleep(2) after the rotary stop is replaced by a Yes/No question
   * progress and status are reported through callbacks
+  * the disassembly torque (most negative measured torque during the
+    disassembly step) is tracked and reported
+  * on Stop / error: all movement is stopped, then the linear drive is
+    sent to 0 and we WAIT until it is really there before switching off
 """
 import os
 import time
@@ -42,7 +46,8 @@ class AssemblyProcess:
     ]
 
     def __init__(self, cmds, scope, graph_cls, status, progress, ask_yes_no,
-                 stop_event, shutdown_wait=5.0, stop_wait=1.0):
+                 stop_event, torque_cb=None, stop_wait=1.0,
+                 linear_home_timeout=120.0):
         self.cmds = cmds
         self.scope = scope
         self.graph_cls = graph_cls
@@ -50,9 +55,12 @@ class AssemblyProcess:
         self.progress = progress        # progress(fraction 0..1)
         self.ask_yes_no = ask_yes_no    # ask_yes_no(question) -> bool
         self.stop_event = stop_event    # threading.Event set by Stop button
-        self.shutdown_wait = shutdown_wait
+        self.torque_cb = torque_cb or (lambda value: None)
         self.stop_wait = stop_wait
+        self.linear_home_timeout = linear_home_timeout
         self.graph = None
+        self.disassembly_torque = None  # most negative torque [Nm]
+        self._last_torque_report = 0.0
         self._scope_running = False
 
     # ------------------------------------------------------------ helpers
@@ -65,21 +73,38 @@ class AssemblyProcess:
         if self.stop_event.is_set():
             raise ProcessAborted("Stopped by user.")
 
-    def _sleep(self, seconds):
-        """time.sleep that reacts to the Stop button."""
+    def _sleep(self, seconds, track=False):
+        """time.sleep that reacts to Stop (and can sample the torque)."""
         end = time.monotonic() + seconds
+        interval = 0.01 if track else 0.05
         while True:
             self._check_stop()
+            if track:
+                self._track_torque()
             remaining = end - time.monotonic()
             if remaining <= 0:
                 return
-            time.sleep(min(0.05, remaining))
+            time.sleep(min(interval, remaining))
 
     @staticmethod
     def _build_report_path():
         os.makedirs(REPORTS_DIR, exist_ok=True)
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         return os.path.join(REPORTS_DIR, f"torque_log_{stamp}.csv")
+
+    # ------------------------------------------- disassembly torque tracking
+    def _track_torque(self):
+        """Read the torque once; keep the most negative value seen."""
+        torque = self.cmds.get_measured_force(ROTARY_DRIVE)
+        if self.disassembly_torque is None or torque < self.disassembly_torque:
+            self.disassembly_torque = torque
+        self._report_torque()
+
+    def _report_torque(self, force=False):
+        now = time.monotonic()
+        if force or now - self._last_torque_report > 0.1:   # don't flood GUI
+            self._last_torque_report = now
+            self.torque_cb(self.disassembly_torque)
 
     # ------------------------------------------------- waits (from main.py)
     def _reset_rotary(self):
@@ -92,20 +117,24 @@ class AssemblyProcess:
             actual = c.get_actual_position(ROTARY_DRIVE) * 10
             time.sleep(0.5)
 
-    def _await_position(self, drive, demand, tolerance):
+    def _await_position(self, drive, demand, tolerance, track=False):
         """
         Wait until the drive is within +-tolerance of demand. Also returns
         if the drive crossed `demand` between two polls (e.g. while passing
         -30 on its way to -40), so a fast move can't be missed.
+        With track=True it polls every 10 ms and samples the torque.
         """
+        interval = 0.01 if track else 0.5
         actual = self.cmds.get_actual_position(drive)
         previous = actual
         while not demand - tolerance <= actual <= demand + tolerance:
             if (previous - demand) * (actual - demand) < 0:
                 return
             self._check_stop()
+            if track:
+                self._track_torque()
             previous = actual
-            time.sleep(0.5)
+            time.sleep(interval)
             actual = self.cmds.get_actual_position(drive)
 
     def _wait_torque(self, target, label, timeout_s=120.0):
@@ -128,34 +157,65 @@ class AssemblyProcess:
 
     # ------------------------------------------------------------ shutdown
     def _emergency_stop(self):
+        """Stop all current movement immediately."""
         for drive in (ROTARY_DRIVE, LINEAR_DRIVE):
             try:
                 self.cmds.send_mc_stop(drive)
             except Exception as e:
                 print(f"Emergency stop failed on {drive}: {e}")
 
+    def _wait_linear_at_zero(self):
+        """Wait (NOT interruptible by Stop) until linear drive is at 0."""
+        start = time.time()
+        while time.time() - start < self.linear_home_timeout:
+            pos = self.cmds.get_actual_position(LINEAR_DRIVE)
+            if abs(pos) <= 0.5:
+                return True
+            time.sleep(0.1)
+        print("WARNING: linear drive did not reach 0 before timeout")
+        return False
+
     def _shutdown(self):
-        """Same sequence as close_connection() in main.py."""
         c = self.cmds
         drives = [LINEAR_DRIVE, ROTARY_DRIVE]
+
         try:
             if self._scope_running:
                 self.scope.stop()
                 self._scope_running = False
+        except Exception as e:
+            print(f"Error stopping scope: {e}")
+
+        # 1. linear drive to 0 - and really wait until it is there
+        try:
+            self.status("Linear drive returning to 0...")
             c.send_mc_Absolute_VAI(LINEAR_DRIVE, 0, 0.01, 1, 1)
-            time.sleep(self.shutdown_wait)
-            for d in drives:
+            self._wait_linear_at_zero()
+        except Exception as e:
+            print(f"Error moving linear drive to 0: {e}")
+
+        # 2. stop + switch off + close
+        for d in drives:
+            try:
                 c.send_mc_stop(d)
                 time.sleep(self.stop_wait)
-            for d in drives:
+            except Exception as e:
+                print(f"Error stopping {d}: {e}")
+        for d in drives:
+            try:
                 c.switch_off(d)
+            except Exception as e:
+                print(f"Error switching off {d}: {e}")
+        try:
             c.close_connection()
         except Exception as e:
-            print(f"Error during shutdown: {e}")
+            print(f"Error closing connection: {e}")
 
     # ----------------------------------------------------------------- run
     def run(self):
         c = self.cmds
+        self.disassembly_torque = None
+        self.torque_cb(None)
 
         self._step("Connecting")
         if not c.establish_connection([ROTARY_DRIVE, LINEAR_DRIVE], HOST_IP):
@@ -212,13 +272,16 @@ class AssemblyProcess:
             if not self.ask_yes_no("Was the dose applied?"):
                 raise ProcessAborted("Dose not applied - process aborted.")
 
-            # --- disassembly
+            # --- disassembly (torque is tracked here, 10 ms sampling)
             self._step("Disassembly")
+            self.disassembly_torque = None
             c.send_mc_Relative_VAI(ROTARY_DRIVE, -5, 10 / 10000, 100, 100)
-            self._sleep(5)
+            self._sleep(5, track=True)
 
             c.send_mc_Absolute_VAI(ROTARY_DRIVE, -3, 360 / 10000, 100, 100)
-            self._await_position(ROTARY_DRIVE, -3, 1)
+            self._await_position(ROTARY_DRIVE, -3, 1, track=True)
+            self._report_torque(force=True)
+            print(f"Disassembly torque: {self.disassembly_torque} Nm")
 
             self.scope.stop()
             self._scope_running = False
@@ -239,14 +302,14 @@ class AssemblyProcess:
             final_msg = "Finished successfully."
 
         except ProcessAborted as e:
-            self._emergency_stop()
+            self._emergency_stop()          # stop all movement right away
             final_msg = str(e) or "Process aborted."
         except Exception as e:
             self._emergency_stop()
             final_msg = f"Error: {e}"
         finally:
             self._step("Closing connection")
-            self._shutdown()
+            self._shutdown()                # linear -> 0, then switch off
 
         # graph (only if a report was actually written)
         if os.path.exists(report_path):

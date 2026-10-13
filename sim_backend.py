@@ -43,6 +43,10 @@ class _SimDrive:
         self.pos0 = self.target = self.position()
         self.dur = 0.0
 
+    def moving_negative(self):
+        return (self.dur > 0 and self.target < self.pos0
+                and time.monotonic() - self.t0 < self.dur)
+
 
 class SimCommands:
     """Same function names/signatures as LinUDP_Commands (only those used)."""
@@ -52,6 +56,7 @@ class SimCommands:
         self.connection_ok = connection_ok
         self.drives = {ROTARY: _SimDrive(0.0), LINEAR: _SimDrive(5.0)}
         self._rate = {ROTARY: 800.0, LINEAR: 20.0}   # units per second
+        self.loosened = False    # True once the joint was unscrewed
 
     # ---- helpers
     def _log(self, text):
@@ -91,11 +96,15 @@ class SimCommands:
     def send_mc_Absolute_VAI(self, drive, pos, vel, acc, dec):
         d = self.drives[drive]
         self._log(f"mc_Absolute {drive} -> {pos}")
+        if drive == ROTARY and pos < d.position():
+            self.loosened = True
         d.move_to(pos, self._duration(drive, pos - d.position()))
 
     def send_mc_Relative_VAI(self, drive, delta, vel, acc, dec):
         d = self.drives[drive]
         self._log(f"mc_Relative {drive} {delta:+}")
+        if drive == ROTARY and delta < 0:
+            self.loosened = True
         d.move_to(d.position() + delta, self._duration(drive, delta))
 
     def send_mc_stop(self, drive):
@@ -112,6 +121,7 @@ class SimCommands:
             self, drive, distance, vel, acc, limit, target):
         d = self.drives[drive]
         self._log(f"fc_IncActPos {drive} +{distance} (vel {vel})")
+        self.loosened = False
         # slow velocity -> long move; fast velocity -> short move
         d.move_to(d.position() + distance,
                   self._duration(drive, distance, rate=max(vel, 1) * 1.8))
@@ -123,9 +133,16 @@ class SimCommands:
     def get_measured_force(self, drive):
         if drive != ROTARY:
             return 0.0
-        pos = self.drives[ROTARY].position()
-        torque = 0.0001 * max(0.0, pos - 800.0)
-        return max(0.0, torque + random.uniform(-0.0003, 0.0003))
+        d = self.drives[ROTARY]
+        pos = d.position()
+        noise = random.uniform(-0.0003, 0.0003)
+        if self.loosened:
+            # unscrewing: negative break-away torque while turning back
+            if d.moving_negative() and pos > 800.0:
+                return -0.05 * (1.0 + 0.3 * random.random()) + noise
+            return noise
+        # tightening: torque grows once the screw is seated (pos > 800)
+        return max(0.0, 0.0001 * max(0.0, pos - 800.0) + noise)
 
 
 class SimScope:
