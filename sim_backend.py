@@ -1,13 +1,11 @@
 """
-sim_backend.py
-
 Fake replacements for LinUDP_Commands, PseudoScopeRecorder and CSV_Graph
 so the whole process can be tested without any hardware.
 
- * Drives move smoothly towards their target over a short, realistic time.
- * The rotary torque rises as the rotary drive tightens (position > 800),
-   with a bit of noise, so the torque waits behave like the real thing.
- * Use SimCommands(speed=3) to run everything 3x faster.
+Drives move smoothly towards their target over a short, realistic time.
+The rotary torque rises as the rotary drive tightens (position > 800),
+with a bit of noise, so the torque waits behave like the real thing.
+Use SimCommands(speed=3) to run everything 3x faster.
 """
 import csv
 import os
@@ -184,7 +182,7 @@ class SimScope:
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         with open(path, "w", newline="") as f:
             w = csv.writer(f)
-            w.writerow(["time_s", "channel2", "channel3", "channel4"])   # channel2 = torque
+            w.writerow(["time_s", "channel2", "channel3", "channel4"])
             w.writerows(self._rows)
 
 

@@ -77,7 +77,7 @@ class App:
         self.root = root
         self.dev_mode = dev_mode
         root.title("Torque measurements" + ("  [DEV MODE]" if dev_mode else ""))
-        root.geometry("460x370")
+        root.geometry("600x440")
         root.iconbitmap("ico/ypsn.ico")
         root.resizable(False, False)
 
@@ -86,6 +86,11 @@ class App:
         self.running = False
         self.graph = None
         self.png_path = None
+        self.assembly_torque = None
+        self.disassembly_torque = None
+        self.transfer_kind = None
+        self.transfer_value = None
+        self.pending_transfer = None
 
         # ---- dev-only widgets
         self.sim_var = tk.BooleanVar(value=True)
@@ -118,19 +123,26 @@ class App:
         self.stop_btn = ColorButton(buttons, text="Stop", command=self.stop,
                                     bg="#d63031", state="disabled")     # red
         self.stop_btn.grid(row=0, column=1, padx=5)
+        self.transfer_btn = ColorButton(
+            buttons, text="Transfer to Excel", width=16,
+            command=self.transfer_to_excel, bg="#1769aa", state="disabled")
+        self.transfer_btn.grid(row=0, column=2, padx=5)
         if dev_mode:
             self.graph_btn = ttk.Button(buttons, text="Show graph", width=12,
                                         command=self.show_graph,
                                         state="disabled")
-            self.graph_btn.grid(row=0, column=2, padx=5)
+            self.graph_btn.grid(row=0, column=3, padx=5)
 
-        self.bar = ttk.Progressbar(root, maximum=100, length=420)
+        self.bar = ttk.Progressbar(root, maximum=100, length=540)
         self.bar.pack(pady=10)
 
-        # disassembly torque (most negative torque seen during disassembly)
-        self.torque_var = tk.StringVar(value="Disassembly torque:  ---")
+        # Both torque values are shown throughout the session.
+        self.assembly_torque_var = tk.StringVar(value="Assembly max torque:  ---")
+        ttk.Label(root, textvariable=self.assembly_torque_var,
+                  font=("Helvetica", 16, "bold")).pack(pady=(4, 2))
+        self.torque_var = tk.StringVar(value="Disassembly max torque:  ---")
         ttk.Label(root, textvariable=self.torque_var,
-                  font=("Helvetica", 16, "bold")).pack(pady=8)
+                  font=("Helvetica", 16, "bold")).pack(pady=(2, 8))
 
         # status bar at the bottom
         self.status_var = tk.StringVar(value="Ready")
@@ -151,7 +163,14 @@ class App:
         if self.graph_btn:
             self.graph_btn.config(state="disabled")
         self.bar["value"] = 0
-        self.torque_var.set("Disassembly torque:  ---")
+        self.assembly_torque = None
+        self.disassembly_torque = None
+        self.assembly_torque_var.set("Assembly max torque:  ---")
+        self.torque_var.set("Disassembly max torque:  ---")
+        self.transfer_kind = None
+        self.transfer_value = None
+        self.pending_transfer = None
+        self.transfer_btn.config(state="disabled")
         # simulation can only ever be requested in dev mode
         simulate = self.dev_mode and self.sim_var.get()
         threading.Thread(target=self._worker, args=(simulate, self.needle),
@@ -169,7 +188,98 @@ class App:
     def stop(self):
         self.stop_event.set()
         self.stop_btn.config(state="disabled")
+        # Release the worker if it is waiting for the assembly transfer button.
+        if self.pending_transfer is not None:
+            self.pending_transfer["transferred"] = False
+            self.pending_transfer["event"].set()
+            self.pending_transfer = None
+        self.transfer_kind = None
+        self.transfer_value = None
+        self.transfer_btn.config(state="disabled")
         self.status_var.set("Stopping...")
+
+    @staticmethod
+    def _write_to_selected_excel_cell(value):
+        """Write a numeric torque value to Excel's current single-cell selection."""
+        try:
+            import xlwings as xw
+        except ImportError as exc:
+            raise RuntimeError(
+                "Excel transfer requires xlwings. Install it with "
+                "'python -m pip install xlwings', keep Excel open, then retry."
+            ) from exc
+
+        try:
+            if xw.apps.count == 0:
+                raise RuntimeError("No running Excel instance was found.")
+            try:
+                app = xw.apps.active
+            except Exception:
+                app = xw.apps[0]
+            selection = app.selection
+        except Exception as exc:
+            raise RuntimeError(
+                "Could not access Excel. Open the workbook in desktop Excel, "
+                "select one destination cell, and try again."
+            ) from exc
+
+        if not isinstance(selection, xw.Range):
+            raise RuntimeError(
+                "Excel does not currently have a worksheet cell selected. "
+                "Select one cell and click Transfer to Excel again."
+            )
+        try:
+            if selection.count != 1:
+                raise RuntimeError(
+                    "Select exactly one Excel cell before transferring the torque."
+                )
+            book_name = selection.book.name
+            sheet_name = selection.sheet.name
+            address = selection.address
+            selection.value = float(value)
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            raise RuntimeError(
+                "Excel could not write to the selected cell. Check that the "
+                "workbook and worksheet are editable, then retry."
+            ) from exc
+        return f"{book_name} — {sheet_name}!{address}"
+
+    def transfer_to_excel(self):
+        """Transfer the torque currently waiting for an Excel destination."""
+        if self.transfer_kind not in ("assembly", "disassembly"):
+            return
+        if self.transfer_value is None:
+            return
+
+        kind = self.transfer_kind
+        value = self.transfer_value
+        try:
+            target = self._write_to_selected_excel_cell(value)
+        except Exception as exc:
+            messagebox.showerror("Excel transfer failed", str(exc), parent=self.root)
+            self.status_var.set("Excel transfer failed; select a cell and retry.")
+            return
+
+        if kind == "assembly":
+            box = self.pending_transfer
+            self.pending_transfer = None
+            if box is not None:
+                box["transferred"] = True
+                box["target"] = target
+                box["event"].set()
+            self.status_var.set(
+                f"Assembly torque {value:.4f} Nm transferred to {target}.")
+        else:
+            self.status_var.set(
+                f"Disassembly torque {value:.4f} Nm transferred to {target}.")
+
+        self.transfer_kind = None
+        self.transfer_value = None
+        self.transfer_btn.config(state="disabled")
+        if not self.running:
+            self.start_btn.config(state="normal")
 
     def show_graph(self):
         """Dev mode: open the saved PNG in the system image viewer."""
@@ -192,6 +302,15 @@ class App:
         self.q.put(("ask", question, box))
         box["event"].wait()
         return box["answer"]
+
+    def _await_assembly_transfer(self, torque):
+        """Pause the worker until the assembly torque is transferred or stopped."""
+        box = {"event": threading.Event(), "transferred": False}
+        self.q.put(("transfer_ready", "assembly", torque, box))
+        while not box["event"].wait(0.1):
+            if self.stop_event.is_set():
+                return False
+        return box["transferred"]
 
     def _worker(self, simulate, needle):
         try:
@@ -219,6 +338,9 @@ class App:
                 progress=lambda f: self.q.put(("progress", f)),
                 torque_cb=lambda v: self.q.put(("torque", v)),
                 error_cb=lambda m: self.q.put(("error", m)),
+                wait_for_assembly_transfer=self._await_assembly_transfer,
+                disassembly_torque_ready_cb=lambda v: self.q.put(
+                    ("transfer_ready", "disassembly", v, None)),
                 ask_yes_no=self._ask_yes_no,
                 stop_event=self.stop_event,
                 needle=needle,
@@ -242,8 +364,30 @@ class App:
                     self.bar["value"] = data[0] * 100
                 elif kind == "torque":
                     v = data[0]
-                    self.torque_var.set("Disassembly torque:  ---" if v is None
-                                        else f"Disassembly torque:  {v:.4f} Nm")
+                    self.disassembly_torque = v
+                    self.torque_var.set(
+                        "Disassembly max torque:  ---" if v is None
+                        else f"Disassembly max torque:  {v:.4f} Nm")
+                elif kind == "transfer_ready":
+                    torque_kind, value, box = data
+                    if torque_kind == "assembly":
+                        self.assembly_torque = value
+                        self.assembly_torque_var.set(
+                            f"Assembly max torque:  {value:.4f} Nm")
+                        # A Stop request may arrive just before this queue item.
+                        if self.stop_event.is_set():
+                            if box is not None:
+                                box["transferred"] = False
+                                box["event"].set()
+                            continue
+                        self.pending_transfer = box
+                    else:
+                        self.disassembly_torque = value
+                    self.transfer_kind = torque_kind
+                    self.transfer_value = value
+                    self.transfer_btn.config(state="normal")
+                    self.status_var.set(
+                        f"{torque_kind.capitalize()} torque ready — transfer to Excel.")
                 elif kind == "error":
                     messagebox.showerror("Error", data[0], parent=self.root)
                 elif kind == "ask":
@@ -254,7 +398,8 @@ class App:
                 elif kind == "done":
                     self.running = False
                     self.graph, self.png_path = data[0]
-                    self.start_btn.config(state="normal")
+                    self.start_btn.config(
+                        state="normal" if self.transfer_kind is None else "disabled")
                     self.stop_btn.config(state="disabled")
                     if self.graph_btn and (self.graph or self.png_path):   # dev only
                         self.graph_btn.config(state="normal")

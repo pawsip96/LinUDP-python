@@ -121,6 +121,7 @@ class AssemblyProcess:
         "Moving linear drive down",
         "Tightening (fast)",
         "Tightening (to target force)",
+        "Waiting for assembly torque transfer",
         "Waiting for dose confirmation",
         "Disassembly",
         "Saving report",
@@ -129,7 +130,9 @@ class AssemblyProcess:
 
     def __init__(self, cmds, scope, graph_cls, status, progress, ask_yes_no,
                  stop_event, torque_cb=None, error_cb=None, stop_wait=1.0,
-                 linear_home_timeout=120.0, needle="BD needle"):
+                 linear_home_timeout=120.0, needle="BD needle",
+                 wait_for_assembly_transfer=None,
+                 disassembly_torque_ready_cb=None):
         self.cmds = cmds
         self.scope = scope
         self.graph_cls = graph_cls
@@ -137,8 +140,12 @@ class AssemblyProcess:
         self.progress = progress        # progress(fraction 0..1)
         self.ask_yes_no = ask_yes_no    # ask_yes_no(question) -> bool
         self.stop_event = stop_event    # threading.Event set by Stop button
-        self.torque_cb = torque_cb or (lambda value: None)   # abs. torque [Nm]
+        self.torque_cb = torque_cb or (lambda value: None)   # abs. disassembly torque [Nm]
         self.error_cb = error_cb or (lambda message: None)   # error_cb(text)
+        # The GUI pauses after assembly until the operator transfers the value.
+        self.wait_for_assembly_transfer = wait_for_assembly_transfer
+        self.disassembly_torque_ready_cb = (
+            disassembly_torque_ready_cb or (lambda value: None))
         self._warnings = []             # problems found during shutdown/report
         self.stop_wait = stop_wait
         self.linear_home_timeout = linear_home_timeout
@@ -147,7 +154,9 @@ class AssemblyProcess:
         self.fast_torque = NEEDLE_TYPES[needle]["fast_torque"]
         self.graph = None
         self.png_path = None            # saved graph image, if found
+        self.assembly_torque = None     # maximum sampled positive torque during tightening [Nm]
         self.disassembly_torque = None  # raw minimum from the CSV (negative)
+        self._track_assembly_torque = False
         self._scope_running = False
 
     # ------------------------------------------------------------ helpers
@@ -198,10 +207,15 @@ class AssemblyProcess:
                        f"{csv_path}:\n{e}")
             return
         self.disassembly_torque = minimum
-        self.torque_cb(abs(minimum))
+        reported_torque = abs(minimum)
+        self.torque_cb(reported_torque)
         print(f"Disassembly torque (min of CSV): {minimum} Nm "
-              f"-> reported as {abs(minimum)} Nm")
-        if minimum >= 0:
+              f"-> reported as {reported_torque} Nm")
+        if minimum < 0:
+            # Enable Excel transfer only when the CSV contains a valid negative
+            # break-away torque, as expected during disassembly.
+            self.disassembly_torque_ready_cb(reported_torque)
+        else:
             self._warn("The minimum torque in the CSV is not negative "
                        f"({minimum} Nm), so no disassembly torque was "
                        "recorded. Check the torque column / the scope data.")
@@ -233,12 +247,20 @@ class AssemblyProcess:
             time.sleep(0.5)
             actual = self.cmds.get_actual_position(drive)
 
+    def _record_assembly_peak(self, torque):
+        """Keep the maximum non-negative torque sampled during tightening."""
+        if torque >= 0.0 and (
+                self.assembly_torque is None or torque > self.assembly_torque):
+            self.assembly_torque = torque
+
     def _wait_torque(self, target, label, timeout_s=120.0):
         start = time.time()
         last_ui = 0.0
         while True:
             self._check_stop()
             torque = self.cmds.get_measured_force(ROTARY_DRIVE)
+            if self._track_assembly_torque:
+                self._record_assembly_peak(torque)
             now = time.time()
             if now - last_ui > 0.2:               # don't flood the GUI
                 self.status(f"{label}: {torque:.4f} / {target:.4f} Nm")
@@ -310,7 +332,9 @@ class AssemblyProcess:
     # ----------------------------------------------------------------- run
     def run(self):
         c = self.cmds
+        self.assembly_torque = None
         self.disassembly_torque = None
+        self._track_assembly_torque = False
         self.png_path = None
         self.torque_cb(None)
 
@@ -360,6 +384,7 @@ class AssemblyProcess:
             self._sleep(MESSAGE_DELAY)
 
             self._step("Tightening (fast)")
+            self._track_assembly_torque = True
             c.send_fc_VAI_IncActPosWithHigherForceCtrlLimitAndTargetForce(
                 ROTARY_DRIVE, 1600, 180, 100, 0.084, 0.085)
             self._wait_torque(self.fast_torque, "Tightening (fast)")
@@ -369,10 +394,25 @@ class AssemblyProcess:
                 ROTARY_DRIVE, 3 * 360, 2, 100, 0.084, 0.085)
             self._wait_torque(self.target_force, "Tightening (to target)")
             c.send_mc_stop(ROTARY_DRIVE)
+            # Include one final reading after stopping the rotary drive.
+            self._record_assembly_peak(c.get_measured_force(ROTARY_DRIVE))
+            self._track_assembly_torque = False
+            if self.assembly_torque is None:
+                raise RuntimeError("No assembly torque measurement was recorded.")
 
             self._sleep(MESSAGE_DELAY)
             c.send_mc_Absolute_VAI(LINEAR_DRIVE, 0, 0.01, 100, 100)
             self._await_position(LINEAR_DRIVE, 0, 1)
+
+            # The operator must transfer the measured assembly torque before
+            # the dose-confirmation prompt is shown.
+            if self.wait_for_assembly_transfer is not None:
+                self._step("Waiting for assembly torque transfer")
+                transferred = self.wait_for_assembly_transfer(self.assembly_torque)
+                if not transferred:
+                    self._check_stop()
+                    raise ProcessAborted(
+                        "Assembly torque was not transferred - process aborted.")
 
             # --- replaces time.sleep(2): ask the operator
             self._step("Waiting for dose confirmation")
