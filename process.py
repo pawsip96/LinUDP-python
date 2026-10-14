@@ -1,7 +1,7 @@
 """
 process.py
 
-Your main.py logic, reorganised into one class so a GUI can drive it.
+main.py logic, reorganised into one class so a GUI can drive it.
 The drive commands module is passed in, so the same code runs against
 the real LinUDP_Commands or against the simulator (sim_backend.py).
 
@@ -9,11 +9,16 @@ Differences to main.py:
   * every wait loop checks the Stop request
   * time.sleep(2) after the rotary stop is replaced by a Yes/No question
   * progress and status are reported through callbacks
-  * the disassembly torque (most negative measured torque during the
-    disassembly step) is tracked and reported
+  * the needle type (BD / CF) sets the target torque and the torque at
+    which the fast tightening phase ends (see NEEDLE_TYPES)
+  * the disassembly torque is NOT tracked live: after the CSV report is
+    saved, the CSV is parsed, the minimum (most negative) torque value is
+    taken and reported as an absolute value
   * on Stop / error: all movement is stopped, then the linear drive is
     sent to 0 and we WAIT until it is really there before switching off
 """
+import csv
+import glob
 import os
 import time
 import traceback
@@ -22,13 +27,89 @@ from datetime import datetime
 ROTARY_DRIVE = "192.168.1.1"
 LINEAR_DRIVE = "192.168.1.2"
 HOST_IP = "192.168.1.3"
-TARGET_FORCE = 0.063
+
+# Needle types. Selected in the GUI (or passed to AssemblyProcess).
+#   target_force : final tightening target torque [Nm]
+#   fast_torque  : torque at which the fast tightening phase ends [Nm]
+NEEDLE_TYPES = {
+    "BD needle": {"target_force": 0.063, "fast_torque": 0.03},
+    "CF needle": {"target_force": 0.02, "fast_torque": 0.01},
+}
 MESSAGE_DELAY = 0.1
 REPORTS_DIR = "reports"
+
+# Which CSV column holds the torque?
+#   None  -> auto-detect: first column whose header contains "torque" or "force"
+#   "abc" -> column with this header name (case-insensitive)
+#   3     -> column index (0 = first column), also works for files without header
+TORQUE_COLUMN = "channel2"
 
 
 class ProcessAborted(Exception):
     """Raised to leave the process early (Stop button, dose answered 'No')."""
+
+
+def _to_float(text):
+    return float(text.strip().replace(",", "."))      # also accepts "0,063"
+
+
+def _is_number(text):
+    try:
+        _to_float(text)
+        return True
+    except ValueError:
+        return False
+
+
+def read_min_torque(csv_path, column=TORQUE_COLUMN):
+    """
+    Parse the scope CSV and return the minimum (most negative) value of the
+    torque column.
+    """
+    with open(csv_path, newline="") as f:
+        sample = f.read(4096)
+        f.seek(0)
+        try:
+            dialect = csv.Sniffer().sniff(sample, delimiters=",;\t")
+        except csv.Error:
+            dialect = csv.excel
+        rows = [r for r in csv.reader(f, dialect) if r]
+
+    if not rows:
+        raise ValueError("the CSV file is empty")
+
+    has_header = not all(_is_number(c) for c in rows[0])
+    header = [c.strip() for c in rows[0]] if has_header else None
+    data = rows[1:] if has_header else rows
+
+    # ---- choose the torque column
+    if isinstance(column, int):
+        idx = column
+    elif isinstance(column, str):
+        lowered = [h.lower() for h in header] if header else []
+        if column.strip().lower() not in lowered:
+            raise ValueError(f"column '{column}' not found. Columns: {header}")
+        idx = lowered.index(column.strip().lower())
+    else:
+        if header is None:
+            raise ValueError("the CSV has no header row - set TORQUE_COLUMN "
+                             "in process.py to the column index")
+        matches = [i for i, h in enumerate(header)
+                   if "torque" in h.lower() or "force" in h.lower()]
+        if not matches:
+            raise ValueError("no torque column found - set TORQUE_COLUMN in "
+                             f"process.py. Columns in the CSV: {header}")
+        idx = matches[0]
+
+    values = []
+    for row in data:
+        try:
+            values.append(_to_float(row[idx]))
+        except (ValueError, IndexError):
+            continue                                  # skip junk rows
+    if not values:
+        raise ValueError(f"no numeric values found in column {idx}")
+    return min(values)
 
 
 class AssemblyProcess:
@@ -48,7 +129,7 @@ class AssemblyProcess:
 
     def __init__(self, cmds, scope, graph_cls, status, progress, ask_yes_no,
                  stop_event, torque_cb=None, error_cb=None, stop_wait=1.0,
-                 linear_home_timeout=120.0):
+                 linear_home_timeout=120.0, needle="BD needle"):
         self.cmds = cmds
         self.scope = scope
         self.graph_cls = graph_cls
@@ -56,14 +137,17 @@ class AssemblyProcess:
         self.progress = progress        # progress(fraction 0..1)
         self.ask_yes_no = ask_yes_no    # ask_yes_no(question) -> bool
         self.stop_event = stop_event    # threading.Event set by Stop button
-        self.torque_cb = torque_cb or (lambda value: None)
+        self.torque_cb = torque_cb or (lambda value: None)   # abs. torque [Nm]
         self.error_cb = error_cb or (lambda message: None)   # error_cb(text)
-        self._warnings = []             # problems found during shutdown
+        self._warnings = []             # problems found during shutdown/report
         self.stop_wait = stop_wait
         self.linear_home_timeout = linear_home_timeout
+        self.needle = needle
+        self.target_force = NEEDLE_TYPES[needle]["target_force"]
+        self.fast_torque = NEEDLE_TYPES[needle]["fast_torque"]
         self.graph = None
-        self.disassembly_torque = None  # most negative torque [Nm]
-        self._last_torque_report = 0.0
+        self.png_path = None            # saved graph image, if found
+        self.disassembly_torque = None  # raw minimum from the CSV (negative)
         self._scope_running = False
 
     # ------------------------------------------------------------ helpers
@@ -80,18 +164,15 @@ class AssemblyProcess:
         if self.stop_event.is_set():
             raise ProcessAborted("Stopped by user.")
 
-    def _sleep(self, seconds, track=False):
-        """time.sleep that reacts to Stop (and can sample the torque)."""
+    def _sleep(self, seconds):
+        """time.sleep that reacts to the Stop button."""
         end = time.monotonic() + seconds
-        interval = 0.01 if track else 0.05
         while True:
             self._check_stop()
-            if track:
-                self._track_torque()
             remaining = end - time.monotonic()
             if remaining <= 0:
                 return
-            time.sleep(min(interval, remaining))
+            time.sleep(min(0.05, remaining))
 
     @staticmethod
     def _build_report_path():
@@ -99,19 +180,31 @@ class AssemblyProcess:
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         return os.path.join(REPORTS_DIR, f"torque_log_{stamp}.csv")
 
-    # ------------------------------------------- disassembly torque tracking
-    def _track_torque(self):
-        """Read the torque once; keep the most negative value seen."""
-        torque = self.cmds.get_measured_force(ROTARY_DRIVE)
-        if self.disassembly_torque is None or torque < self.disassembly_torque:
-            self.disassembly_torque = torque
-        self._report_torque()
+    @staticmethod
+    def _png_files():
+        found = set()
+        for folder in (REPORTS_DIR, "."):
+            found.update(glob.glob(os.path.join(folder, "*.png")))
+        return found
 
-    def _report_torque(self, force=False):
-        now = time.monotonic()
-        if force or now - self._last_torque_report > 0.1:   # don't flood GUI
-            self._last_torque_report = now
-            self.torque_cb(self.disassembly_torque)
+    # ------------------------------------------------- disassembly torque
+    def _evaluate_disassembly_torque(self, csv_path):
+        """Parse the saved CSV, take the minimum torque, report |minimum|."""
+        try:
+            minimum = read_min_torque(csv_path)
+        except Exception as e:
+            traceback.print_exc()
+            self._warn(f"Could not read the disassembly torque from "
+                       f"{csv_path}:\n{e}")
+            return
+        self.disassembly_torque = minimum
+        self.torque_cb(abs(minimum))
+        print(f"Disassembly torque (min of CSV): {minimum} Nm "
+              f"-> reported as {abs(minimum)} Nm")
+        if minimum >= 0:
+            self._warn("The minimum torque in the CSV is not negative "
+                       f"({minimum} Nm), so no disassembly torque was "
+                       "recorded. Check the torque column / the scope data.")
 
     # ------------------------------------------------- waits (from main.py)
     def _reset_rotary(self):
@@ -124,24 +217,20 @@ class AssemblyProcess:
             actual = c.get_actual_position(ROTARY_DRIVE) * 10
             time.sleep(0.5)
 
-    def _await_position(self, drive, demand, tolerance, track=False):
+    def _await_position(self, drive, demand, tolerance):
         """
         Wait until the drive is within +-tolerance of demand. Also returns
         if the drive crossed `demand` between two polls (e.g. while passing
         -30 on its way to -40), so a fast move can't be missed.
-        With track=True it polls every 10 ms and samples the torque.
         """
-        interval = 0.01 if track else 0.5
         actual = self.cmds.get_actual_position(drive)
         previous = actual
         while not demand - tolerance <= actual <= demand + tolerance:
             if (previous - demand) * (actual - demand) < 0:
                 return
             self._check_stop()
-            if track:
-                self._track_torque()
             previous = actual
-            time.sleep(interval)
+            time.sleep(0.5)
             actual = self.cmds.get_actual_position(drive)
 
     def _wait_torque(self, target, label, timeout_s=120.0):
@@ -222,6 +311,7 @@ class AssemblyProcess:
     def run(self):
         c = self.cmds
         self.disassembly_torque = None
+        self.png_path = None
         self.torque_cb(None)
 
         self._step("Connecting")
@@ -272,29 +362,34 @@ class AssemblyProcess:
             self._step("Tightening (fast)")
             c.send_fc_VAI_IncActPosWithHigherForceCtrlLimitAndTargetForce(
                 ROTARY_DRIVE, 1600, 180, 100, 0.084, 0.085)
-            self._wait_torque(0.03, "Tightening (fast)")
+            self._wait_torque(self.fast_torque, "Tightening (fast)")
 
             self._step("Tightening (to target force)")
             c.send_fc_VAI_IncActPosWithHigherForceCtrlLimitAndTargetForce(
                 ROTARY_DRIVE, 3 * 360, 2, 100, 0.084, 0.085)
-            self._wait_torque(TARGET_FORCE, "Tightening (to target)")
+            self._wait_torque(self.target_force, "Tightening (to target)")
             c.send_mc_stop(ROTARY_DRIVE)
+
+            self._sleep(MESSAGE_DELAY)
+            c.send_mc_Absolute_VAI(LINEAR_DRIVE, 0, 0.01, 100, 100)
+            self._await_position(LINEAR_DRIVE, 0, 1)
 
             # --- replaces time.sleep(2): ask the operator
             self._step("Waiting for dose confirmation")
             if not self.ask_yes_no("Was the dose applied?"):
                 raise ProcessAborted("Dose not applied - process aborted.")
 
-            # --- disassembly (torque is tracked here, 10 ms sampling)
-            self._step("Disassembly")
-            self.disassembly_torque = None
-            c.send_mc_Relative_VAI(ROTARY_DRIVE, -5, 10 / 10000, 100, 100)
-            self._sleep(5, track=True)
+            c.send_mc_Absolute_VAI(LINEAR_DRIVE, -40, 0.01, 1, 1)
+            self._await_position(LINEAR_DRIVE, -30, 1)
+            self._sleep(1)
 
-            c.send_mc_Absolute_VAI(ROTARY_DRIVE, -3, 360 / 10000, 100, 100)
-            self._await_position(ROTARY_DRIVE, -3, 1, track=True)
-            self._report_torque(force=True)
-            print(f"Disassembly torque: {self.disassembly_torque} Nm")
+            # --- disassembly
+            self._step("Disassembly")
+            c.send_mc_Relative_VAI(ROTARY_DRIVE, -5, 10 / 10000, 100, 100)
+            self._sleep(8)
+
+            c.send_mc_Absolute_VAI(ROTARY_DRIVE, -3, 60 / 10000, 0.1, 100)
+            self._await_position(ROTARY_DRIVE, -3, 1)
 
             self.scope.stop()
             self._scope_running = False
@@ -307,9 +402,11 @@ class AssemblyProcess:
             c.send_mc_Absolute_VAI(ROTARY_DRIVE, 0, 360 / 10000, 100, 100)
             self._await_position(ROTARY_DRIVE, 0, 1)
 
+            # --- report: save CSV, then take the minimum torque from it
             self._step("Saving report")
             self.scope.convert()
             self.scope.save_csv(report_path)
+            self._evaluate_disassembly_torque(report_path)
 
             ok = True
             final_msg = "Finished successfully."
@@ -329,8 +426,15 @@ class AssemblyProcess:
         # graph (only if a report was actually written)
         if os.path.exists(report_path):
             try:
+                before = self._png_files()
                 self.graph = self.graph_cls(report_path)
                 self.graph.save_png()
+                # where did the PNG end up?
+                self.png_path = getattr(self.graph, "png_path", None)
+                if not self.png_path:
+                    new = self._png_files() - before
+                    if new:
+                        self.png_path = max(new, key=os.path.getmtime)
             except Exception as e:
                 print(f"Graph error: {e}")
 

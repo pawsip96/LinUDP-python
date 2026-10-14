@@ -184,7 +184,7 @@ class SimScope:
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         with open(path, "w", newline="") as f:
             w = csv.writer(f)
-            w.writerow(["time_s", "torque_Nm", "rotary_pos", "linear_pos"])
+            w.writerow(["time_s", "channel2", "channel3", "channel4"])   # channel2 = torque
             w.writerows(self._rows)
 
 
@@ -206,7 +206,7 @@ class SimGraph:
         with open(self.csv_path) as f:
             for row in csv.DictReader(f):
                 t.append(float(row["time_s"]))
-                torque.append(float(row["torque_Nm"]))
+                torque.append(float(row["channel2"]))
         fig = Figure(figsize=(8, 4))
         ax = fig.subplots()
         ax.plot(t, torque)

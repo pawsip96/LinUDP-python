@@ -11,12 +11,24 @@ In production mode sim_backend.py is never imported, so you can leave
 that file out of the production install entirely.
 """
 import argparse
+import os
 import queue
 import threading
 import tkinter as tk
+import webbrowser
+from pathlib import Path
 from tkinter import ttk, messagebox
 
-from process import AssemblyProcess, ROTARY_DRIVE
+# The graph is created on the process thread and only saved to a PNG, so use
+# Matplotlib's non-GUI backend. This MUST happen before CSV_Graph (pyplot)
+# is imported. It avoids "Starting a Matplotlib GUI outside of the main thread".
+try:
+    import matplotlib
+    matplotlib.use("Agg")
+except ImportError:
+    pass
+
+from process import AssemblyProcess, ROTARY_DRIVE, NEEDLE_TYPES
 
 
 class ColorButton(tk.Label):
@@ -45,6 +57,9 @@ class ColorButton(tk.Label):
             self._command()
 
     def configure(self, **kw):
+        if "bg" in kw:
+            self._color = kw.pop("bg")
+            self._apply()
         if "state" in kw:
             self._state = kw.pop("state")
             self._apply()
@@ -55,17 +70,22 @@ class ColorButton(tk.Label):
 
 
 class App:
+    NEEDLE_ON = "#1f6feb"     # selected needle button (blue)
+    NEEDLE_OFF = "#8a8f98"    # not selected (grey)
+
     def __init__(self, root, dev_mode=False):
         self.root = root
         self.dev_mode = dev_mode
-        root.title("Assembly Process" + ("  [DEV MODE]" if dev_mode else ""))
-        root.geometry("460x300")
+        root.title("Torque measurements" + ("  [DEV MODE]" if dev_mode else ""))
+        root.geometry("460x370")
+        root.iconbitmap("ico/ypsn.ico")
         root.resizable(False, False)
 
         self.q = queue.Queue()          # worker thread -> GUI thread
         self.stop_event = threading.Event()
         self.running = False
         self.graph = None
+        self.png_path = None
 
         # ---- dev-only widgets
         self.sim_var = tk.BooleanVar(value=True)
@@ -75,6 +95,20 @@ class App:
                             variable=self.sim_var).pack(pady=(12, 4))
         else:
             ttk.Label(root, text="").pack(pady=(12, 4))   # keep layout equal
+
+        # ---- needle type selection (BD / CF)
+        self.needle = "BD needle"
+        needle_row = ttk.Frame(root)
+        needle_row.pack(pady=(2, 0))
+        self.needle_btns = {}
+        for i, name in enumerate(NEEDLE_TYPES):
+            btn = ColorButton(needle_row, text=name, bg=self.NEEDLE_OFF,
+                              command=lambda n=name: self.select_needle(n))
+            btn.grid(row=0, column=i + 1, padx=4)
+            self.needle_btns[name] = btn
+        self.needle_info_var = tk.StringVar()
+        ttk.Label(root, textvariable=self.needle_info_var).pack(pady=(2, 0))
+        self.select_needle(self.needle)
 
         buttons = ttk.Frame(root)
         buttons.pack(pady=8)
@@ -111,6 +145,7 @@ class App:
         self.running = True
         self.stop_event.clear()
         self.graph = None
+        self.png_path = None
         self.start_btn.config(state="disabled")
         self.stop_btn.config(state="normal")
         if self.graph_btn:
@@ -119,8 +154,17 @@ class App:
         self.torque_var.set("Disassembly torque:  ---")
         # simulation can only ever be requested in dev mode
         simulate = self.dev_mode and self.sim_var.get()
-        threading.Thread(target=self._worker, args=(simulate,),
+        threading.Thread(target=self._worker, args=(simulate, self.needle),
                          daemon=True).start()
+
+    def select_needle(self, name):
+        """Choose BD / CF needle (locked while a process is running)."""
+        if self.running:
+            return
+        self.needle = name
+        for n, btn in self.needle_btns.items():
+            btn.configure(bg=self.NEEDLE_ON if n == name else self.NEEDLE_OFF)
+        cfg = NEEDLE_TYPES[name]
 
     def stop(self):
         self.stop_event.set()
@@ -128,7 +172,10 @@ class App:
         self.status_var.set("Stopping...")
 
     def show_graph(self):
-        if self.graph:
+        """Dev mode: open the saved PNG in the system image viewer."""
+        if self.png_path and os.path.exists(self.png_path):
+            webbrowser.open(Path(self.png_path).resolve().as_uri())
+        elif self.graph:
             self.graph.display()
 
     def on_close(self):
@@ -146,7 +193,7 @@ class App:
         box["event"].wait()
         return box["answer"]
 
-    def _worker(self, simulate):
+    def _worker(self, simulate, needle):
         try:
             if simulate:
                 import sim_backend as sb          # dev mode only
@@ -174,14 +221,15 @@ class App:
                 error_cb=lambda m: self.q.put(("error", m)),
                 ask_yes_no=self._ask_yes_no,
                 stop_event=self.stop_event,
+                needle=needle,
                 **waits,
             )
             proc.run()
-            self.q.put(("done", proc.graph))
+            self.q.put(("done", (proc.graph, proc.png_path)))
         except Exception as e:
             self.q.put(("status", "Stopped due to an error."))
             self.q.put(("error", f"{type(e).__name__}: {e}"))
-            self.q.put(("done", None))
+            self.q.put(("done", (None, None)))
 
     # --------------------------------------------------------- GUI thread
     def _poll(self):
@@ -205,10 +253,10 @@ class App:
                     box["event"].set()
                 elif kind == "done":
                     self.running = False
-                    self.graph = data[0]
+                    self.graph, self.png_path = data[0]
                     self.start_btn.config(state="normal")
                     self.stop_btn.config(state="disabled")
-                    if self.graph_btn and self.graph:   # dev mode only
+                    if self.graph_btn and (self.graph or self.png_path):   # dev only
                         self.graph_btn.config(state="normal")
         except queue.Empty:
             pass

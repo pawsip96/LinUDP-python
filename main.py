@@ -118,9 +118,9 @@ def start_assembly_process():
 
 def start_disassembly_process():
     LinUDP_Commands.send_mc_Relative_VAI(ROTARY_DRIVE, -5, 10 / 10000, 100, 100)
-    time.sleep(5)
+    time.sleep(8)
 
-    LinUDP_Commands.send_mc_Absolute_VAI(ROTARY_DRIVE, -3, 360 / 10000, 100, 100)
+    LinUDP_Commands.send_mc_Absolute_VAI(ROTARY_DRIVE, -3, 60 / 10000, 1, 100)
     await_rotary_position(-3)
 
     scope.stop()
