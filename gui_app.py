@@ -76,9 +76,8 @@ class App:
     def __init__(self, root, dev_mode=False):
         self.root = root
         self.dev_mode = dev_mode
-        root.title("Torque measurements" + ("  [DEV MODE]" if dev_mode else ""))
-        root.geometry("600x440")
-        root.iconbitmap("ico/ypsn.ico")
+        root.title("Assembly Process" + ("  [DEV MODE]" if dev_mode else ""))
+        root.geometry("460x300")
         root.resizable(False, False)
 
         self.q = queue.Queue()          # worker thread -> GUI thread
@@ -137,10 +136,10 @@ class App:
         self.bar.pack(pady=10)
 
         # Both torque values are shown throughout the session.
-        self.assembly_torque_var = tk.StringVar(value="Assembly max torque:  ---")
+        self.assembly_torque_var = tk.StringVar(value="Assembly torque:  ---")
         ttk.Label(root, textvariable=self.assembly_torque_var,
                   font=("Helvetica", 16, "bold")).pack(pady=(4, 2))
-        self.torque_var = tk.StringVar(value="Disassembly max torque:  ---")
+        self.torque_var = tk.StringVar(value="Removal torque:  ---")
         ttk.Label(root, textvariable=self.torque_var,
                   font=("Helvetica", 16, "bold")).pack(pady=(2, 8))
 
@@ -165,8 +164,8 @@ class App:
         self.bar["value"] = 0
         self.assembly_torque = None
         self.disassembly_torque = None
-        self.assembly_torque_var.set("Assembly max torque:  ---")
-        self.torque_var.set("Disassembly max torque:  ---")
+        self.assembly_torque_var.set("Assembly torque:  ---")
+        self.torque_var.set("Removal torque:  ---")
         self.transfer_kind = None
         self.transfer_value = None
         self.pending_transfer = None
@@ -233,10 +232,11 @@ class App:
                 raise RuntimeError(
                     "Select exactly one Excel cell before transferring the torque."
                 )
-            book_name = selection.book.name
-            sheet_name = selection.sheet.name
-            address = selection.address
+
             selection.value = float(value)
+
+            # Move the selection one cell down
+            app.selection.offset(1, 0).select()
         except RuntimeError:
             raise
         except Exception as exc:
@@ -244,7 +244,6 @@ class App:
                 "Excel could not write to the selected cell. Check that the "
                 "workbook and worksheet are editable, then retry."
             ) from exc
-        return f"{book_name} — {sheet_name}!{address}"
 
     def transfer_to_excel(self):
         """Transfer the torque currently waiting for an Excel destination."""
@@ -270,10 +269,10 @@ class App:
                 box["target"] = target
                 box["event"].set()
             self.status_var.set(
-                f"Assembly torque {value:.4f} Nm transferred to {target}.")
+                f"Assembly torque {value:.4f} Nm transferred to excel.")
         else:
             self.status_var.set(
-                f"Disassembly torque {value:.4f} Nm transferred to {target}.")
+                f"Removal torque {value:.4f} Nm transferred to excel.")
 
         self.transfer_kind = None
         self.transfer_value = None
@@ -366,14 +365,14 @@ class App:
                     v = data[0]
                     self.disassembly_torque = v
                     self.torque_var.set(
-                        "Disassembly max torque:  ---" if v is None
-                        else f"Disassembly max torque:  {v:.4f} Nm")
+                        "Removal torque:  ---" if v is None
+                        else f"Removal torque:  {v:.4f} Nm")
                 elif kind == "transfer_ready":
                     torque_kind, value, box = data
                     if torque_kind == "assembly":
                         self.assembly_torque = value
                         self.assembly_torque_var.set(
-                            f"Assembly max torque:  {value:.4f} Nm")
+                            f"Assembly torque:  {value:.4f} Nm")
                         # A Stop request may arrive just before this queue item.
                         if self.stop_event.is_set():
                             if box is not None:
