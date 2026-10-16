@@ -77,7 +77,7 @@ class App:
         self.root = root
         self.dev_mode = dev_mode
         root.title("Assembly Process" + ("  [DEV MODE]" if dev_mode else ""))
-        root.geometry("460x330")
+        root.geometry("860x380")
         root.iconbitmap("ico/ypsn.ico")
         root.resizable(False, False)
 
